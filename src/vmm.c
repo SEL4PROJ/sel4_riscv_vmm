@@ -2345,15 +2345,10 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag)
                     break;
                 }
                 case SBI_SHUTDOWN: {
-                    // hijack shutdown to clear stip
+                    /* Just suspend the VM */
 
-                    seL4_CPtr vcpu = vm_get_vcpu(vm);
-                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
-                    assert(!res.error);
-
-                    seL4_Word sip = res.value;
-                    sip &= ~BIT(5);
-                    int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
+                    seL4_CPtr tcb = vm_get_tcb(vm);
+                    int err = seL4_TCB_Suspend(tcb);
                     assert(!err);
                     break;
                 }
