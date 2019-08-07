@@ -2256,7 +2256,7 @@ static int handle_page_fault(vm_t *vm, fault_t *fault)
         }
     }
     addr -= (addr & 0xfff);
-    printf("blindly map %lx to %lx\n", addr, addr);
+    printf("Blindly map %lx to %lx\n", addr, addr);
     map_vm_device(vm, addr, addr, seL4_AllRights);
     ignore_fault(fault);
     return err;
