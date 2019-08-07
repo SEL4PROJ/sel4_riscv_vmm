@@ -550,6 +550,7 @@ struct fault {
 /// The width of the fault
     enum fault_width width;
     int content;
+    uint32_t riscv_inst;
 /// decoded instruction
     riscv_inst_t decoded_inst; 
 };
@@ -748,6 +749,7 @@ static int new_fault(fault_t *fault)
     addr = seL4_GetMR(seL4_VMFault_Addr),
     fsr = seL4_GetMR(seL4_VMFault_FSR);
     ip = seL4_GetMR(seL4_VMFault_IP);
+    fault->riscv_inst = seL4_GetMR(seL4_VMFault_Instruction);
     DFAULT("%s: New fault @ 0x%x from PC 0x%x\n", vm->name, addr, ip);
     /* Create the fault object */
     fault->is_wfi = 0;
@@ -1602,7 +1604,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
     uintptr_t offset = addr - PLIC_BASE;
     int write = fault_is_write(fault);
     void *vmm_va = (void *)d->priv;
-    /* darn, need to decode load/store instructions */
     decode_inst(fault);
     seL4_UserContext *regs = fault_get_ctx(fault); 
     riscv_inst_t *ri = &fault->decoded_inst;
@@ -2186,8 +2187,13 @@ void decode_inst(fault_t *f)
     uint32_t *i = &(f->decoded_inst.inst);
     riscv_inst_t *ri = &(f->decoded_inst);
     *i = 0;
-    seL4_Word ip_gpa = gva_to_gpa(f->vm, f->ip);
-    vm_copyin(f->vm, i, ip_gpa, 4);
+    //seL4_Word ip_gpa = gva_to_gpa(f->vm, f->ip);
+    //vm_copyin(f->vm, i, ip_gpa, 4);
+    /* with a bit improvement from the kernel, now we do
+     * not need to do the nested page table walking to
+     * get the faulting instruction for decoding
+     */
+    *i = f->riscv_inst;
     ri->opcode = OPCODE(*i);
     switch (ri->opcode) {
         case ST_OP:
