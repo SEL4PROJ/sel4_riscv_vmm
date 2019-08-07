@@ -1698,7 +1698,7 @@ static int linux_irq[] = {
     7,
     8,
     10,
-    100
+    130
 };
 
 static struct irq_data *linux_irq_data[128] = { 0 };
@@ -1783,9 +1783,8 @@ static int vm_inject_IRQ(virq_handle_t virq)
     seL4_Word sie = res.value;
     /* set the externall pending */
     switch (virq->virq) {
-        case 100:
+        case 130:
             sip |= BIT(5);
-            //irq_data_ack_irq(virq->token);
             break;
         default:
             plic_set_pending(virq->virq, virq->token);
