@@ -545,8 +545,6 @@ struct fault {
     bool is_wfi;
 /// For multiple str/ldr and 32 bit access, the fault is handled in stages
     int stage;
-/// If the instruction requires fetching, cache it here
-    seL4_Word instruction;
 /// The width of the fault
     enum fault_width width;
     int content;
@@ -757,7 +755,6 @@ static int new_fault(fault_t *fault)
     fault->ip = ip;
     fault->base_addr = fault->addr = addr;
     fault->fsr = fsr;
-    fault->instruction = 0;
     fault->data = 0;
     fault->width = -1;
     if (fault_is_data(fault)) {
@@ -1188,7 +1185,6 @@ static void *map_device(vspace_t *vspace, vka_t* vka, simple_t* simple, uintptr_
         return NULL;
     }
     DMAP("Mapped device ipa0x%lx->p0x%lx\n", vaddr, paddr);
-    printf("Mapped device ipa %lx to %lx cache %d\n", vaddr, paddr, cache);
     return vaddr;
 }
 
@@ -1609,10 +1605,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
     riscv_inst_t *ri = &fault->decoded_inst;
     switch (ri->opcode) {
         case ST_OP: {
-#if 0
-            printf("addr %d %lx  data %d %lx\n",
-                    ri->rs1, get_reg(regs, ri->rs1), ri->rs2, get_reg(regs, ri->rs2));
-#endif
             // 32bit!!!
             assert(fault->width == WIDTH_WORD);
             uint32_t data = (uint32_t)get_reg(regs, ri->rs2);
@@ -1627,7 +1619,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
             return 0;
         }
         case LD_OP: {
-            //printf("load addr %d dest %d\n", ri->rs1, ri->rd);
             assert(fault->width == WIDTH_WORD);
             uint32_t data = 0;
             if (offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) {
@@ -1641,7 +1632,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
             reg |= data;
             set_reg(regs, ri->rd, reg);
             //printf("pc %lx load data %x from %lx to %d %lx\n", regs->pc, data, offset, ri->rd, get_reg(regs, ri->rd)); 
-            //printf("reg s1%lx\n", regs->s1);
             ignore_fault(fault);
             return 0;
         }
@@ -1688,17 +1678,15 @@ static int vm_install_plic(vm_t *vm)
     return vm_add_device(vm, &plic_dev); 
 }
 
+#define IRQ_UART    10
+#define IRQ_VTIMER  130
+
+#define SIP_TIMER       BIT(5)
+#define SIP_EXTERNAL    BIT(9)
+
 static int linux_irq[] = {
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    10,
-    130
+    IRQ_UART,       // 8250
+    IRQ_VTIMER      // vtimer
 };
 
 static struct irq_data *linux_irq_data[128] = { 0 };
@@ -1744,15 +1732,13 @@ void do_irq_server_ack(void* token)
     seL4_Word sip = res.value;
     switch (irq_data->irq) {
         case 100:
-            sip &= ~BIT(5);
-            break;
+            sip &= ~SIP_TIMER;
         default:
-            sip &= ~BIT(9);
+            sip &= ~SIP_EXTERNAL;
             break;
     }
     int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
-    assert(!err);
-    irq_data_ack_irq(irq_data);
+    assert(!err); irq_data_ack_irq(irq_data);
 }
 
 static int vm_inject_timer_interrupt(vm_t *vm)
@@ -1764,7 +1750,7 @@ static int vm_inject_timer_interrupt(vm_t *vm)
     res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIE);
     assert(!res.error);
     seL4_Word sie = res.value;
-    sip |= BIT(5);
+    sip |= SIP_TIMER;
     int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
     assert(!err);
     return err;
@@ -1783,12 +1769,12 @@ static int vm_inject_IRQ(virq_handle_t virq)
     seL4_Word sie = res.value;
     /* set the externall pending */
     switch (virq->virq) {
-        case 130:
-            sip |= BIT(5);
+        case IRQ_VTIMER:
+            sip |= SIP_TIMER;
             break;
         default:
             plic_set_pending(virq->virq, virq->token);
-            sip |= BIT(9);
+            sip |= SIP_EXTERNAL;
             break;
     }
     int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
@@ -1862,7 +1848,6 @@ static int install_linux_devices(vm_t *vm)
 #endif
 
 
-
 static int copy_out_page(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t* vka, void* src, void* dst, size_t size)
 {
     cspacepath_t dup_cap_path, cap_path;
@@ -1903,7 +1888,6 @@ static int copy_out_page(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t* vka,
         if (bits == 0) {
             bits = MAP_PAGE_BITS;
         }
-        printf("bits %d\n", bits);
     }
 
     /* Copy the cap */
@@ -2338,7 +2322,7 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag)
 
                     seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vm_get_vcpu(vm), seL4_VCPUReg_SIP);
                     assert(!res.error);
-                    res.value &= ~BIT(5);
+                    res.value &= ~SIP_TIMER;
                     seL4_RISCV_VCPU_WriteRegs(vm_get_vcpu(vm), seL4_VCPUReg_SIP, res.value);
                     regs->a0 = 0;
                     break;
