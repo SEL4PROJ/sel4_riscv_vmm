@@ -147,17 +147,16 @@ struct irq_server_node {
 };
 
 /* Executes the registered callback for incoming IRQS */
-static void
-irq_server_node_handle_irq(struct irq_server_node *n, seL4_Word badge)
+static void irq_server_node_handle_irq(struct irq_server_node *n, seL4_Word badge)
 {
-    struct irq_data* irqs;
+    struct irq_data *irqs;
     irqs = n->irqs;
     /* Mask out reserved bits */
     badge = badge & n->badge_mask;
     /* For each bit, call the registered handler */
     while (badge) {
         int irq_idx;
-        struct irq_data* irq;
+        struct irq_data *irq;
         irq_idx = CTZL(badge);
         irq = &irqs[irq_idx];
         ZF_LOGD("Received IRQ %d, badge 0x%x, index %d\n", irq->irq, (unsigned)badge, irq_idx);
@@ -167,8 +166,7 @@ irq_server_node_handle_irq(struct irq_server_node *n, seL4_Word badge)
 }
 
 /* Binds and IRQ to an endpoint */
-static seL4_CPtr
-irq_bind(irq_t irq, seL4_CPtr notification_cap, int idx, vka_t* vka, simple_t *simple)
+static seL4_CPtr irq_bind(irq_t irq, seL4_CPtr notification_cap, int idx, vka_t *vka, simple_t *simple)
 {
     seL4_CPtr irq_cap, bnotification_cap;
     cspacepath_t irq_path, notification_path, bnotification_path;
@@ -222,11 +220,10 @@ irq_bind(irq_t irq, seL4_CPtr notification_cap, int idx, vka_t* vka, simple_t *s
 }
 
 /* Registers an IRQ callback and enabled the IRQ */
-struct irq_data*
-irq_server_node_register_irq(irq_server_node_t n, irq_t irq, irq_handler_fn cb,
-                             void* token, vka_t* vka, seL4_CPtr cspace,
+struct irq_data *irq_server_node_register_irq(irq_server_node_t n, irq_t irq, irq_handler_fn cb,
+                             void *token, vka_t *vka, seL4_CPtr cspace,
                              simple_t *simple) {
-    struct irq_data* irqs;
+    struct irq_data *irqs;
     int i;
     irqs = n->irqs;
 
@@ -248,8 +245,7 @@ irq_server_node_register_irq(irq_server_node_t n, irq_t irq, irq_handler_fn cb,
 }
 
 /* Creates a new IRQ server node which contains Thread data and registered IRQ data. */
-struct irq_server_node*
-irq_server_node_new(seL4_CPtr notification, seL4_Word badge_mask) {
+struct irq_server_node *irq_server_node_new(seL4_CPtr notification, seL4_Word badge_mask) {
     struct irq_server_node *n;
     n = calloc(1, sizeof(*n));
     if (n) {
@@ -275,14 +271,13 @@ struct irq_server_thread {
 /// notification object data
     vka_object_t notification;
 /// Linked list chain
-    struct irq_server_thread* next;
+    struct irq_server_thread *next;
 };
 
 /* IRQ handler thread. Wait on a notification object for IRQs. When one arrives, send a
  * synchronous message to the registered endpoint. If no synchronous endpoint was
  * registered, call the appropriate handler function directly (must be thread safe) */
-static void
-_irq_thread_entry(struct irq_server_thread* st)
+static void _irq_thread_entry(struct irq_server_thread *st)
 {
     seL4_CPtr sep;
     seL4_CPtr notification;
@@ -313,10 +308,11 @@ _irq_thread_entry(struct irq_server_thread* st)
 }
 
 /* Creates a new thread for an IRQ server */
-struct irq_server_thread*
-irq_server_thread_new(vspace_t* vspace, vka_t* vka, seL4_CPtr cspace, seL4_Word priority,
-                      simple_t *simple, seL4_Word label, seL4_CPtr sep) {
-    struct irq_server_thread* st;
+struct irq_server_thread *irq_server_thread_new(vspace_t *vspace, vka_t *vka, seL4_CPtr cspace,
+                                                seL4_Word priority, simple_t *simple,
+                                                seL4_Word label, seL4_CPtr sep)
+{
+    struct irq_server_thread *st;
     int err;
 
     /* Allocate memory for the structure */
@@ -350,7 +346,7 @@ irq_server_thread_new(vspace_t* vspace, vka_t* vka, seL4_CPtr cspace, seL4_Word 
         return NULL;
     }
     /* Start the thread */
-    err = sel4utils_start_thread(&st->thread, (void*)_irq_thread_entry, st, NULL, 1);
+    err = sel4utils_start_thread(&st->thread, (void *)_irq_thread_entry, st, NULL, 1);
     seL4_DebugNameThread(st->thread.tcb.cptr, "irqserver");
     if (err) {
         ZF_LOGE("Failed to start IRQ server thread\n");
@@ -368,20 +364,19 @@ struct irq_server {
     vka_object_t reply;
     seL4_Word label;
     int max_irqs;
-    vspace_t* vspace;
+    vspace_t *vspace;
     seL4_CPtr cspace;
     vka_t* vka;
     seL4_Word thread_priority;
     simple_t simple;
-    struct irq_server_thread* server_threads;
+    struct irq_server_thread *server_threads;
     void *vm;
 };
 
 typedef struct irq_server *irq_server_t;
 
 /* Handle an incoming IPC from a server node */
-void
-irq_server_handle_irq_ipc(irq_server_t irq_server UNUSED)
+void irq_server_handle_irq_ipc(irq_server_t irq_server UNUSED)
 {
     seL4_Word badge;
     uintptr_t node_ptr;
@@ -391,16 +386,16 @@ irq_server_handle_irq_ipc(irq_server_t irq_server UNUSED)
     if (node_ptr == 0) {
         ZF_LOGE("Invalid data in irq server IPC\n");
     } else {
-        irq_server_node_handle_irq((struct irq_server_node*)node_ptr, badge);
+        irq_server_node_handle_irq((struct irq_server_node *)node_ptr, badge);
     }
 }
 
 /* Register for a function to be called when an IRQ arrives */
-struct irq_data*
-irq_server_register_irq(irq_server_t irq_server, irq_t irq,
-                        irq_handler_fn cb, void* token) {
-    struct irq_server_thread* st;
-    struct irq_data* irq_data;
+struct irq_data *irq_server_register_irq(irq_server_t irq_server, irq_t irq,
+                                         irq_handler_fn cb, void *token)
+{
+    struct irq_server_thread *st;
+    struct irq_data *irq_data;
 
     /* Try to assign the IRQ to an existing node */
     for (st = irq_server->server_threads; st != NULL; st = st->next) {
@@ -438,11 +433,11 @@ irq_server_register_irq(irq_server_t irq_server, irq_t irq,
 }
 
 /* Create a new IRQ server */
-int irq_server_new(vspace_t* vspace, vka_t* vka, seL4_CPtr cspace, seL4_Word priority,
+int irq_server_new(vspace_t *vspace, vka_t *vka, seL4_CPtr cspace, seL4_Word priority,
                simple_t *simple, seL4_CPtr sync_ep, seL4_Word label,
                int nirqs, irq_server_t *ret_irq_server)
 {
-    struct irq_server* irq_server;
+    struct irq_server *irq_server;
 
     /* Structure allocation and initialisation */
     irq_server = malloc(sizeof(*irq_server));
@@ -469,7 +464,7 @@ int irq_server_new(vspace_t* vspace, vka_t* vka, seL4_CPtr cspace, seL4_Word pri
 
     /* If a fixed number of IRQs are requested, create and start the server threads */
     if (nirqs > -1) {
-        struct irq_server_thread** server_thread;
+        struct irq_server_thread **server_thread;
         int n_nodes;
         int i;
         server_thread = &irq_server->server_threads;
@@ -485,7 +480,7 @@ int irq_server_new(vspace_t* vspace, vka_t* vka, seL4_CPtr cspace, seL4_Word pri
     return 0;
 }
 
-seL4_MessageInfo_t irq_server_wait_for_irq(irq_server_t irq_server, seL4_Word* badge_ret)
+seL4_MessageInfo_t irq_server_wait_for_irq(irq_server_t irq_server, seL4_Word *badge_ret)
 {
     seL4_MessageInfo_t msginfo;
     seL4_Word badge;
@@ -534,33 +529,20 @@ enum fault_width {
 };
 
 struct fault {
-/// The VM associated with the fault
     vm_t *vm;
-/// Reply capability to the faulting TCB
     cspacepath_t reply_cap;
-/// VM registers at the time of the fault
     seL4_UserContext regs;
-
-/// The IPA address of the fault
     seL4_Word base_addr;
-/// The IPA address of the fault at the current stage
     seL4_Word addr;
-/// The IPA of the instruction which caused the fault
     seL4_Word ip;
-/// The data which was to be written, or the data to return to the VM
     seL4_Word data;
     seL4_Word fsr;
-/// 'true' if the fault was a prefetch fault rather than a data fault
     bool is_prefetch;
-/// 'true' if we should wait for an interrupt before finishing the fault
     bool is_wfi;
-/// For multiple str/ldr and 32 bit access, the fault is handled in stages
     int stage;
-/// The width of the fault
     enum fault_width width;
     int content;
     uint32_t riscv_inst;
-/// decoded instruction
     riscv_inst_t decoded_inst; 
 };
 
@@ -582,7 +564,7 @@ struct device {
 /// Logical identifier for internal use
     enum devid devid;
 /// A string representation of the device. Useful for debugging
-    const char* name;
+    const char *name;
 /// The physical address of the device */
     seL4_Word pstart;
 /// Device mapping size */
@@ -591,7 +573,7 @@ struct device {
 /// Fault handler */
     int (*handle_page_fault)(struct device *d, vm_t *vm, fault_t *fault);
 /// device emulation private data */
-    void* priv;
+    void *priv;
 };
 
 #define MAX_DEVICES_PER_VM  10
@@ -633,7 +615,6 @@ struct ps_io_ops _io_ops;
 
 extern char _cpio_archive[];
 
-
 typedef struct guest_vspace {
     /* We abuse struct ordering and this member MUST be the first
      * thing in the struct */
@@ -658,6 +639,7 @@ static inline vspace_t *vm_get_vspace(vm_t *vm)
     assert(vm != 0);
     return &vm->vm_vspace;
 }
+
 static fault_t *fault_init(vm_t *vm)
 {
     fault_t *fault;
@@ -789,7 +771,7 @@ static int new_fault(fault_t *fault)
     return err;
 }
 
-static int abandon_fault(fault_t* fault)
+static int abandon_fault(fault_t *fault)
 {
     /* Nothing to do here */
     DFAULT("%s: Release fault @ 0x%x from PC 0x%x\n",
@@ -797,7 +779,7 @@ static int abandon_fault(fault_t* fault)
     return 0;
 }
 
-static int restart_fault(fault_t* fault)
+static int restart_fault(fault_t *fault)
 {
     /* Send the reply */
     fault->stage = 0;
@@ -810,7 +792,7 @@ static int restart_fault(fault_t* fault)
     return abandon_fault(fault);
 }
 
-static int ignore_fault(fault_t* fault)
+static int ignore_fault(fault_t *fault)
 {
     seL4_UserContext *regs;
     int err;
@@ -830,7 +812,7 @@ static int ignore_fault(fault_t* fault)
     return restart_fault(fault);
 }
 
-static int vm_add_device(vm_t* vm, const struct device* d)
+static int vm_add_device(vm_t *vm, const struct device *d)
 {
     assert(d != NULL);
     if (vm->ndevices < MAX_DEVICES_PER_VM) {
@@ -841,8 +823,10 @@ static int vm_add_device(vm_t* vm, const struct device* d)
     }
 }
 
-static int guest_vspace_map(vspace_t *vspace, seL4_CPtr cap, void *vaddr, seL4_CapRights_t rights,
-        int cacheable, size_t size_bits) {
+static int guest_vspace_map(vspace_t *vspace, seL4_CPtr cap, void *vaddr,
+                            seL4_CapRights_t rights,
+                            int cacheable, size_t size_bits)
+{
     int error;
     /* perfrom the guest mapping */
     error = sel4utils_map_page_pd(vspace, cap, vaddr, rights, cacheable, size_bits);
@@ -918,8 +902,8 @@ static int vmm_init(void)
 static int vm_create(const char* name, int priority,
           seL4_CPtr vmm_endpoint, seL4_Word vm_badge,
           vka_t *vka, simple_t *simple, vspace_t *vmm_vspace,
-          ps_io_ops_t* io_ops,
-          vm_t* vm)
+          ps_io_ops_t *io_ops,
+          vm_t *vm)
 {
 
     seL4_Word null_cap_data = seL4_NilData;
@@ -995,7 +979,7 @@ static int vm_create(const char* name, int priority,
 }
 
 
-static int vm_set_bootargs(vm_t* vm, seL4_Word pc, seL4_Word hartid , seL4_Word dtb)
+static int vm_set_bootargs(vm_t *vm, seL4_Word pc, seL4_Word hartid , seL4_Word dtb)
 {
     seL4_UserContext regs;
     seL4_CPtr tcb;
@@ -1013,12 +997,12 @@ static int vm_set_bootargs(vm_t* vm, seL4_Word pc, seL4_Word hartid , seL4_Word 
     return err;
 }
 
-static int vm_start(vm_t* vm)
+static int vm_start(vm_t *vm)
 {
     return seL4_TCB_Resume(vm_get_tcb(vm));
 }
 
-static int vm_stop(vm_t* vm)
+static int vm_stop(vm_t *vm)
 {
     return seL4_TCB_Suspend(vm_get_tcb(vm));
 }
@@ -1032,13 +1016,13 @@ char _cpio_archive_end[1];
 #define MAP_PAGE_SIZE   (1 << MAP_PAGE_BITS)
 #define MAP_PAGE_MASK   (MAP_PAGE_SIZE - 1)
 
-static void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t* vka, uintptr_t vaddr)
+static void *map_ram(vspace_t *vspace, vspace_t *vmm_vspace, vka_t *vka, uintptr_t vaddr)
 {
     vka_object_t frame_obj;
     cspacepath_t frame[2];
 
     reservation_t res;
-    void* addr;
+    void *addr;
     int err;
 
     addr = (void*)(vaddr & ~MAP_PAGE_MASK);
@@ -1112,13 +1096,13 @@ static void *map_vm_ram(vm_t *vm, uintptr_t vaddr)
     return map_ram(vm_get_vspace(vm), vm->vmm_vspace, vm->vka, vaddr);
 }
 
-static int vm_install_ram_only_device(vm_t *vm, const struct device* device) {
+static int vm_install_ram_only_device(vm_t *vm, const struct device *device) {
     struct device d;
     uintptr_t paddr;
     int err;
     d = *device;
     for (paddr = d.pstart; paddr - d.pstart < d.size; paddr += MAP_PAGE_SIZE) {
-        void* addr;
+        void *addr;
         addr = map_vm_ram(vm, paddr);
         if (!addr) {
             return -1;
@@ -1139,16 +1123,16 @@ static int vm_install_ram_only_device(vm_t *vm, const struct device* device) {
 #endif
 
 
-static void *map_device(vspace_t *vspace, vka_t* vka, simple_t* simple, uintptr_t paddr,
+static void *map_device(vspace_t *vspace, vka_t *vka, simple_t *simple, uintptr_t paddr,
            uintptr_t _vaddr, seL4_CapRights_t rights)
 {
     cspacepath_t frame;
-    void* vaddr;
+    void *vaddr;
     int err;
     int cache = 0;
 
     paddr &= ~0xfff;
-    vaddr = (void*)(_vaddr &= ~0xfff);
+    vaddr = (void *)(_vaddr &= ~0xfff);
 
     if (paddr < 0x80000000) cache = 0;
 
@@ -1164,7 +1148,7 @@ static void *map_device(vspace_t *vspace, vka_t* vka, simple_t* simple, uintptr_
     seL4_Word cookie;
     err = vka_utspace_alloc_at(vka, &frame, kobject_get_type(KOBJECT_FRAME, 12), 12, paddr, &cookie);
     if (err) {
-        err = simple_get_frame_cap(simple, (void*)paddr, 12, &frame);
+        err = simple_get_frame_cap(simple, (void *)paddr, 12, &frame);
         if (err) {
             printf("Failed to find device cap for 0x%x\n", (uint32_t)paddr);
             vka_cspace_free(vka, frame.capPtr);
@@ -1199,96 +1183,24 @@ static void *map_device(vspace_t *vspace, vka_t* vka, simple_t* simple, uintptr_
     return vaddr;
 }
 
-void *map_vm_device(vm_t* vm, uintptr_t pa, uintptr_t va, seL4_CapRights_t rights)
+void *map_vm_device(vm_t *vm, uintptr_t pa, uintptr_t va, seL4_CapRights_t rights)
 {
     return map_device(vm_get_vspace(vm), vm->vka, vm->simple, pa, va, rights);
 }
 
-static void *map_emulated_device(vm_t *vm, const struct device *d)
+static void *map_emulated_device_pages(vm_t *vm, struct device *d)
 {
     cspacepath_t vm_frame, vmm_frame;
     vspace_t *vm_vspace, *vmm_vspace;
-    void* vm_addr, *vmm_addr;
-    reservation_t res;
-    vka_object_t frame;
-    vka_t* vka;
-    size_t size;
-    int err;
-
-    vka = vm->vka;
-    vm_addr = (void*)d->pstart;
-    size = d->size;
-    vm_vspace = vm_get_vspace(vm);
-    vmm_vspace = vm->vmm_vspace;
-    assert(size == 0x1000);
-
-    /* Create a frame (and a copy for the VMM) */
-    err = vka_alloc_frame(vka, 12, &frame);
-    assert(!err);
-    if (err) {
-        return NULL;
-    }
-    vka_cspace_make_path(vka, frame.cptr, &vm_frame);
-    err = vka_cspace_alloc_path(vka, &vmm_frame);
-    assert(!err);
-    if (err) {
-        vka_free_object(vka, &frame);
-        return NULL;
-    }
-    err = vka_cnode_copy(&vmm_frame, &vm_frame, seL4_AllRights);
-    assert(!err);
-    if (err) {
-        vka_cspace_free(vka, vm_frame.capPtr);
-        vka_free_object(vka, &frame);
-        return NULL;
-    }
-
-    /* Map the frame to the VM */
-    DMAP("Mapping emulated device ipa %p\n", vm_addr);
-
-    seL4_CapRights_t rights = seL4_CanRead;
-    res = vspace_reserve_range_at(vm_vspace, vm_addr, size, rights, 0);
-    assert(res.res);
-    if (!res.res) {
-        vka_cspace_free(vka, vm_frame.capPtr);
-        vka_cspace_free(vka, vmm_frame.capPtr);
-        vka_free_object(vka, &frame);
-        return NULL;
-    }
-    err = vspace_map_pages_at_vaddr(vm_vspace, &vm_frame.capPtr, NULL, vm_addr,
-                                    1, 12, res);
-    vspace_free_reservation(vm_vspace, res);
-    assert(!err);
-    if (err) {
-        printf("Failed to provide memory\n");
-        vka_cspace_free(vka, vm_frame.capPtr);
-        vka_cspace_free(vka, vmm_frame.capPtr);
-        vka_free_object(vka, &frame);
-        return NULL;
-    }
-    vmm_addr = vspace_map_pages(vmm_vspace, &vmm_frame.capPtr, NULL, seL4_AllRights,
-                                1, 12, 0);
-    assert(vmm_addr);
-    if (vmm_addr == NULL) {
-        return NULL;
-    }
-
-    return vmm_addr;
-}
-
-static void *map_emulated_device_pages(vm_t* vm, struct device *d)
-{
-    cspacepath_t vm_frame, vmm_frame;
-    vspace_t *vm_vspace, *vmm_vspace;
-    void* vm_addr, *vmm_addr, *ret;;
+    void *vm_addr, *vmm_addr, *ret;;
     reservation_t vm_res, vmm_res;
     vka_object_t frame;
-    vka_t* vka;
+    vka_t *vka;
     size_t size, remain_size;
     int err;
 
     vka = vm->vka;
-    vm_addr = (void*)d->pstart;
+    vm_addr = (void *)d->pstart;
     size = d->size;
     remain_size = size;
     vm_vspace = vm_get_vspace(vm);
@@ -1358,8 +1270,9 @@ static void *map_emulated_device_pages(vm_t* vm, struct device *d)
     return ret;
 }
 
-static int handle_ram_fault(struct device* d, vm_t* vm, fault_t* fault)
+static int handle_ram_fault(struct device *d, vm_t *vm, fault_t *fault)
 {
+    /* TODO */
     return 0;
 }
 
@@ -1621,7 +1534,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
             uint32_t data = (uint32_t)get_reg(regs, ri->rs2);
             uint32_t *addr = (uint32_t *)(vmm_va + offset);
             *addr = data;
-            //printf("pc %lx store data %x to %p %lx\n", regs->pc, data, addr, offset);
             if (offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) {
                 plic_pending_irq = 0;
                 do_irq_server_ack(plic_pending_irq_token);
@@ -1642,13 +1554,12 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
             reg &= 0xffffffff00000000;
             reg |= data;
             set_reg(regs, ri->rd, reg);
-            //printf("pc %lx load data %x from %lx to %d %lx\n", regs->pc, data, offset, ri->rd, get_reg(regs, ri->rd)); 
             ignore_fault(fault);
             return 0;
         }
 
         default:
-            printf("unhandled %d\n", ri->opcode);
+            printf("Unhandled %d\n", ri->opcode);
             break;
     }
     return 0;
@@ -1712,9 +1623,9 @@ struct virq_handle {
 
 typedef struct virq_handle *virq_handle_t;
 
-static virq_handle_t vm_virq_new(vm_t* vm, int virq, void (*ack)(void*), void* token)
+static virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)
 {
-    struct virq_handle* virq_data;
+    struct virq_handle *virq_data;
     int err;
 
     virq_data = malloc(sizeof(*virq_data));
@@ -1729,7 +1640,7 @@ static virq_handle_t vm_virq_new(vm_t* vm, int virq, void (*ack)(void*), void* t
     return virq_data;
 }
 
-void do_irq_server_ack(void* token)
+void do_irq_server_ack(void *token)
 {
     assert(token != NULL);
     vm_t *vm = (vm_t *)_irq_server->vm;
@@ -1749,7 +1660,8 @@ void do_irq_server_ack(void* token)
             break;
     }
     int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
-    assert(!err); irq_data_ack_irq(irq_data);
+    assert(!err);
+    irq_data_ack_irq(irq_data);
 }
 
 static int vm_inject_timer_interrupt(vm_t *vm)
@@ -1961,16 +1873,16 @@ static int copy_out(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t* vka, void
 }
 
 
-static int vm_copyout(vm_t* vm, void* data, uintptr_t address, size_t size)
+static int vm_copyout(vm_t *vm, void *data, uintptr_t address, size_t size)
 {
     return copy_out(vm_get_vspace(vm), vm->vmm_vspace, vm->vka, data, address, size);
 }
 
-static int copy_in_page(vspace_t *vmm_vspace, vspace_t *vm_vspace, vka_t* vka, void* dest, void* src, size_t size)
+static int copy_in_page(vspace_t *vmm_vspace, vspace_t *vm_vspace, vka_t *vka, void *dest, void *src, size_t size)
 {
     seL4_CPtr cap, vmm_cap;
     cspacepath_t cap_path, vmm_cap_path;
-    void* tmp_src;
+    void *tmp_src;
     int offset;
     size_t copy_size;
     int bits;
@@ -2030,7 +1942,7 @@ static int copy_in_page(vspace_t *vmm_vspace, vspace_t *vm_vspace, vka_t* vka, v
     return copy_size;
 }
 
-static int copy_in(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t* vka, void* dest, uintptr_t src, size_t size)
+static int copy_in(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t *vka, void *dest, uintptr_t src, size_t size)
 {
     DCOPYIN("copy in 0x%x->0x%x (0x%x bytes)\n", (uint32_t)src, (uint32_t)dest, size);
     while (size) {
@@ -2047,7 +1959,7 @@ static int copy_in(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t* vka, void*
     return 0;
 }
 
-static int vm_copyin(vm_t* vm, void* data, uintptr_t address, size_t size)
+static int vm_copyin(vm_t *vm, void *data, uintptr_t address, size_t size)
 {
     return copy_in(vm->vmm_vspace, vm_get_vspace(vm), vm->vka, data, address, size);
 }
@@ -2256,7 +2168,7 @@ static int handle_page_fault(vm_t *vm, fault_t *fault)
     return err;
 }
 
-static int vm_event(vm_t* vm, seL4_MessageInfo_t tag)
+static int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
 {
     seL4_Word label;
     seL4_Word length;
