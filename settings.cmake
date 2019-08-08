@@ -56,4 +56,5 @@ endif()
 
 set(KernelRiscVHypervisorSupport ON CACHE BOOL "" FORCE)
 set(KernelRootCNodeSizeBits 18 CACHE STRING "" FORCE)
+set(KernelRiscVNumVTimers 1 CACHE STRING "" FORCE)
 
