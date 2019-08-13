@@ -49,7 +49,7 @@ set(HardwareDebugAPI OFF CACHE BOOL "" FORCE)
 set(KernelNumDomains 1 CACHE STRING "" FORCE)
 
 if(SMP)
-    set(KernelMaxNumNodes 4 CACHE STRING "" FORCE)
+    set(KernelMaxNumNodes 2 CACHE STRING "" FORCE)
 else()
     set(KernelMaxNumNodes 1 CACHE STRING "" FORCE)
 endif()
