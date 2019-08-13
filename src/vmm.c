@@ -1607,8 +1607,20 @@ static int vm_install_plic(vm_t *vm)
 #define SIP_EXTERNAL    BIT(9)
 
 static int linux_irq[] = {
-    IRQ_UART,       // 8250
-    IRQ_VTIMER      // vtimer
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    10,
+#if CONFIG_MAX_NUM_NODES > 1
+    132,
+#else
+    130
+#endif
 };
 
 static struct irq_data *linux_irq_data[128] = { 0 };
@@ -1692,8 +1704,12 @@ static int vm_inject_IRQ(virq_handle_t virq)
     seL4_Word sie = res.value;
     /* set the externall pending */
     switch (virq->virq) {
-        case IRQ_VTIMER:
-            sip |= SIP_TIMER;
+#if CONFIG_MAX_NUM_NODES > 1
+        case 132:
+#else
+        case 130:
+#endif
+            sip |= BIT(5);
             break;
         default:
             plic_set_pending(virq->virq, virq->token);
