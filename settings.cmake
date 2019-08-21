@@ -48,12 +48,6 @@ ApplyCommonReleaseVerificationSettings(${RELEASE} ${VERIFICATION})
 set(HardwareDebugAPI OFF CACHE BOOL "" FORCE)
 set(KernelNumDomains 1 CACHE STRING "" FORCE)
 
-if(SMP)
-    set(KernelMaxNumNodes 2 CACHE STRING "" FORCE)
-else()
-    set(KernelMaxNumNodes 1 CACHE STRING "" FORCE)
-endif()
-
 set(KernelRiscVHypervisorSupport ON CACHE BOOL "" FORCE)
 set(KernelRootCNodeSizeBits 18 CACHE STRING "" FORCE)
 set(KernelRiscVNumVTimers 1 CACHE STRING "" FORCE)
