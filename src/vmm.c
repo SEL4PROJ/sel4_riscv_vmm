@@ -36,6 +36,33 @@
 #include <cpio/cpio.h>
 
 
+static int vm_copyin_lock = 0;
+static int vm_map_device_lock = 0;
+
+#if CONFIG_MAX_NUM_NODES > 1
+static inline void lock(int *lock)
+{
+    int tmp = 0;
+    while (!__atomic_compare_exchange_n(lock, &tmp, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+        tmp = 0;
+    }
+}
+
+static inline void unlock(int *lock)
+{
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+}
+#else
+#define lock(x)
+#define unlock(x)
+#endif
+
+#if CONFIG_MAX_NUM_NODES > 1
+#define CONFIG_PER_VCPU_VMM
+#endif
+/* IRQs are directly injected from the irq handler thread */
+#define CONFIG_DIRECT_VCPU_IRQ
+
 /* RISCV instruction decoding */
 
 /* format for store instructions  
@@ -123,8 +150,7 @@ typedef struct irq_server_node* irq_server_node_t;
  *** Generic functions ***
  *************************/
 
-void
-irq_data_ack_irq(struct irq_data* irq)
+void irq_data_ack_irq(struct irq_data* irq)
 {
     if (irq == NULL || irq->cap == seL4_CapNull) {
         ZF_LOGE("IRQ data invalid when acknowledging IRQ\n");
@@ -159,7 +185,6 @@ static void irq_server_node_handle_irq(struct irq_server_node *n, seL4_Word badg
         struct irq_data *irq;
         irq_idx = CTZL(badge);
         irq = &irqs[irq_idx];
-        ZF_LOGD("Received IRQ %d, badge 0x%x, index %d\n", irq->irq, (unsigned)badge, irq_idx);
         irq->cb(irq);
         badge &= ~BIT(irq_idx);
     }
@@ -371,6 +396,8 @@ struct irq_server {
     simple_t simple;
     struct irq_server_thread *server_threads;
     void *vm;
+    /* affinity of the server threads */
+    int affinity;
 };
 
 typedef struct irq_server *irq_server_t;
@@ -413,6 +440,9 @@ struct irq_data *irq_server_register_irq(irq_server_t irq_server, irq_t irq,
         st = irq_server_thread_new(irq_server->vspace, irq_server->vka, irq_server->cspace,
                                    irq_server->thread_priority, &irq_server->simple,
                                    irq_server->label, irq_server->delivery_ep);
+#if CONFIG_MAX_NUM_NODES > 1
+        seL4_TCB_SetAffinity(st->thread.tcb.cptr, irq_server->affinity);
+#endif
         if (st == NULL) {
             ZF_LOGE("Failed to create server thread\n");
             return NULL;
@@ -435,7 +465,7 @@ struct irq_data *irq_server_register_irq(irq_server_t irq_server, irq_t irq,
 /* Create a new IRQ server */
 int irq_server_new(vspace_t *vspace, vka_t *vka, seL4_CPtr cspace, seL4_Word priority,
                simple_t *simple, seL4_CPtr sync_ep, seL4_Word label,
-               int nirqs, irq_server_t *ret_irq_server)
+               int nirqs, int affinity, irq_server_t *ret_irq_server)
 {
     struct irq_server *irq_server;
 
@@ -461,6 +491,7 @@ int irq_server_new(vspace_t *vspace, vka_t *vka, seL4_CPtr cspace, seL4_Word pri
     irq_server->thread_priority = priority;
     irq_server->server_threads = NULL;
     irq_server->simple = *simple;
+    irq_server->affinity = affinity;
 
     /* If a fixed number of IRQs are requested, create and start the server threads */
     if (nirqs > -1) {
@@ -472,6 +503,9 @@ int irq_server_new(vspace_t *vspace, vka_t *vka, seL4_CPtr cspace, seL4_Word pri
         for (i = 0; i < n_nodes; i++) {
             *server_thread = irq_server_thread_new(vspace, vka, cspace, priority,
                                                    simple, label, sync_ep);
+#if CONFIG_MAX_NUM_NODES > 1
+            seL4_TCB_SetAffinity((*server_thread)->thread.tcb.cptr, affinity);
+#endif
             server_thread = &(*server_thread)->next;
         }
     }
@@ -501,15 +535,44 @@ seL4_MessageInfo_t irq_server_wait_for_irq(irq_server_t irq_server, seL4_Word *b
 /* end of interrupt server stuff */
 
 
-#define VM_PRIO             100
-#define VM_BADGE            (1U << 0)
-#define VM_LINUX_NAME       "linux"
-#define VM_LINUX_DTB_NAME   "linux-dtb"
-#define VM_NAME             "Linux"
 
-#define IRQSERVER_PRIO      (VM_PRIO + 1)
-#define IRQ_MESSAGE_LABEL   0xCAFE
-#define MAX_IRQ             128
+/* A 32-bit badge contain for a VM contains two parts.
+ * The high 16 bits are for the VM identity.
+ * The low 16 bits are for identifiying a VCPU inside the VM
+ */
+#define VM_BADGE_SHIFT      (16)
+#define VM_VCPU_BADGE(vm, vcpu)     (((vm) << VM_BADGE_SHIFT) | (vcpu))
+#define VM_VCPU_BADGE_GET_VM(b)     ((b) >> VM_BADGE_SHIFT)
+#define VM_VCPU_BADGE_GET_VCPU(b)   ((b) & 0xffff)
+#define VM_BADGE            (1U << VM_BADGE_SHIFT)
+
+#define VM_PRIO             100
+
+#if CONFIG_MAX_NUM_NODES > 1
+#define VM_LINUX_NAME       "linux-smp"
+#else
+#define VM_LINUX_NAME       "linux"
+#endif
+
+#if CONFIG_MAX_NUM_NODES == 2
+#define VM_LINUX_DTB_NAME    "linux-smp2.dtb"
+#elif CONFIG_MAX_NUM_NODES == 3
+#define VM_LINUX_DTB_NAME    "linux-smp3.dtb"
+#elif CONFIG_MAX_NUM_NODES == 4
+#define VM_LINUX_DTB_NAME    "linux-smp4.dtb"
+#else
+#define VM_LINUX_DTB_NAME   "linux-dtb"
+#endif
+
+#define VM_NAME                 "Linux"
+
+#define IRQSERVER_PRIO          (VM_PRIO + 1)
+#define VMM_PRIO                (IRQSERVER_PRIO + 1)
+#define IRQ_MESSAGE_LABEL       0xCAFE
+#define IPI_MESSAGE_LABEL       0xBEEF
+#define IRQINJ_MESSAGE_LABLE    0xDEEF
+
+#define MAX_IRQ             20 //256
 
 #define VM_CSPACE_SIZE_BITS 4
 #define VM_CSPACE_SLOT      1
@@ -530,6 +593,9 @@ enum fault_width {
 
 struct fault {
     vm_t *vm;
+    struct vcpu_info *vcpu;
+    int    vcpu_id;
+    /// Reply capability to the faulting TCB
     cspacepath_t reply_cap;
     seL4_UserContext regs;
     seL4_Word base_addr;
@@ -577,6 +643,26 @@ struct device {
 };
 
 #define MAX_DEVICES_PER_VM  10
+#define MAX_NUM_VCPUS       4
+
+#if CONFIG_MAX_NUM_NODES > MAX_NUM_VCPUS
+#error CONFIG_MAX_NUM_NODES is greater than MAX_NUM_VCPUS
+#endif
+
+/* Support aarch64 only */
+typedef struct vcpu_info {
+    uint64_t        hart_id;     /* MPIDR */
+    uint64_t        entry_point;    /* entry point in guest physical address */
+    vka_object_t    tcb;
+    vka_object_t    vcpu;
+    fault_t         *fault;
+    /* this is the VMM thread for this VCPU for handling VCPU faluts */
+    sel4utils_thread_t vmm_thread;
+    seL4_CPtr       fault_ep;
+    int             affinity;
+    irq_server_t    irq_server;
+    int             suspended;
+} vcpu_info_t;
 
 struct vm {
     const char              *name;
@@ -589,14 +675,13 @@ struct vm {
     seL4_CPtr               vmm_endpoint;
     sel4utils_alloc_data_t  data;
     vka_object_t            cspace;
-    vka_object_t            tcb;
     vka_object_t            pd;
-    vka_object_t            vcpu;
+    vcpu_info_t             vcpus[MAX_NUM_VCPUS];
+    int                     nvcpus;
     seL4_Word               csapce_root_data;
     void                    *entry_point;
     int                     ndevices;
     struct device           devices[MAX_DEVICES_PER_VM];
-    fault_t                 *fault;
 }; 
 
 /* allocator static pool */
@@ -622,16 +707,18 @@ typedef struct guest_vspace {
 } guest_vspace_t;
 
 
-static inline seL4_CPtr vm_get_tcb(vm_t *vm)
+static inline seL4_CPtr vm_get_tcb(vm_t *vm, int vcpu)
 {
     assert(vm != 0);
-    return vm->tcb.cptr;
+    assert(vcpu >= 0 && vcpu < vm->nvcpus);
+    return vm->vcpus[vcpu].tcb.cptr;
 }
 
-static inline seL4_CPtr vm_get_vcpu(vm_t *vm)
+static inline seL4_CPtr vm_get_vcpu(vm_t *vm, int vcpu)
 {
     assert(vm != 0);
-    return vm->vcpu.cptr;
+    assert(vcpu >= 0 && vcpu < vm->nvcpus);
+    return vm->vcpus[vcpu].vcpu.cptr;
 }
 
 static inline vspace_t *vm_get_vspace(vm_t *vm)
@@ -640,13 +727,21 @@ static inline vspace_t *vm_get_vspace(vm_t *vm)
     return &vm->vm_vspace;
 }
 
-static fault_t *fault_init(vm_t *vm)
+static inline fault_t *vm_get_fault(vm_t *vm, int vcpu)
+{
+    assert(vm != 0);
+    assert(vcpu >= 0 && vcpu < vm->nvcpus);
+    return vm->vcpus[vcpu].fault;
+}
+
+static fault_t *fault_init(vm_t *vm, vcpu_info_t *vcpu)
 {
     fault_t *fault;
     int err;
     fault = (fault_t *)malloc(sizeof(*fault));
     if (fault != NULL) {
         fault->vm = vm;
+        fault->vcpu = vcpu;
         /* Reserve a slot for saving reply caps */
         err = vka_cspace_alloc_path(vm->vka, &fault->reply_cap);
         if (err) {
@@ -714,13 +809,60 @@ static seL4_UserContext* fault_get_ctx(fault_t *f)
 {
     if ((f->content & CONTENT_REGS) == 0) {
         int err;
-        err = seL4_TCB_ReadRegisters(vm_get_tcb(f->vm), false, 0,
+        vcpu_info_t *vcpu = f->vcpu;
+
+        err = seL4_TCB_ReadRegisters(vcpu->tcb.cptr, false, 0,
                                      sizeof(f->regs) / sizeof(f->regs.pc),
                                      &f->regs);
         assert(!err);
         f->content |= CONTENT_REGS;
     }
     return &f->regs;
+}
+
+static int new_user_fault(fault_t *fault)
+{
+    seL4_Word ip, addr;
+    seL4_Word is_prefetch;
+    int err;
+    vm_t *vm;
+
+    vm = fault->vm;
+    assert(vm);
+
+    assert(fault_handled(fault));
+
+    /* First store message registers on the stack to free our message regs */
+    addr = 0;
+    ip = seL4_GetMR(seL4_UserException_FaultIP);
+    fault->riscv_inst = seL4_GetMR(seL4_UserException_Code);
+    DFAULT("%s: New user fault @ 0x%x from PC 0x%x\n", vm->name, addr, ip);
+    /* Create the fault object */
+    fault->is_wfi = 0;
+    fault->is_prefetch = false;
+    fault->ip = ip;
+    fault->base_addr = fault->addr = addr;
+    fault->data = 0;
+    fault->width = -1;
+    if (fault_is_data(fault)) {
+        if (fault_is_read(fault)) {
+            /* No need to load data */
+            fault->content = CONTENT_DATA;
+        } else {
+            fault->content = 0;
+        }
+        fault->stage = -1;
+    } else {
+        /* No need to load width or data */
+        fault->content = CONTENT_DATA | CONTENT_WIDTH;
+    }
+
+    /* Gather additional information */
+    assert(fault->reply_cap.capPtr);
+    err = vka_cnode_saveCaller(&fault->reply_cap);
+    assert(!err);
+
+    return err;
 }
 
 static int new_fault(fault_t *fault)
@@ -796,12 +938,13 @@ static int ignore_fault(fault_t *fault)
 {
     seL4_UserContext *regs;
     int err;
-
+    vcpu_info_t *vcpu = fault->vcpu;
+    assert(vcpu);
     regs = fault_get_ctx(fault);
     /* Advance the PC */
     regs->pc += 4;
     /* Write back CPU registers */
-    err = seL4_TCB_WriteRegisters(vm_get_tcb(fault->vm), false, 0,
+    err = seL4_TCB_WriteRegisters(vcpu->tcb.cptr, false, 0,
                                   sizeof(*regs) / sizeof(regs->pc), regs);
     assert(!err);
     if (err) {
@@ -853,6 +996,23 @@ static int vmm_get_guest_vspace(vspace_t *loader, vspace_t *new_vspace, vka_t *v
     return 0;
 }
 
+
+#define IRQ_UART    10
+
+#if CONFIG_MAX_NUM_NODES > 1
+#define IRQ_VCPU0_VTIMER    132
+#define IRQ_VCPU1_VTIMER    133
+#define IRQ_VCPU2_VTIMER    134
+#define IRQ_VCPU3_VTIMER    135
+
+#else
+
+#define IRQ_VTIMER  130
+#endif
+
+#define SIP_TIMER       BIT(5)
+#define SIP_EXTERNAL    BIT(9)
+
 static int vmm_init(void)
 {
     vka_object_t fault_ep_obj;
@@ -893,11 +1053,297 @@ static int vmm_init(void)
 
     err  = irq_server_new(vspace, vka, simple_get_cnode(simple), IRQSERVER_PRIO,
             simple, fault_ep_obj.cptr,
-            IRQ_MESSAGE_LABEL, MAX_IRQ, &_irq_server);
+            IRQ_MESSAGE_LABEL, MAX_IRQ, 0, &_irq_server);
     assert(!err);
     return 0;
 }
 
+static int vm_start(vm_t* vm)
+{
+    return seL4_TCB_Resume(vm_get_tcb(vm, 0));
+}
+
+static int vm_stop(vm_t* vm)
+{
+    for (int i = 0; i < vm->nvcpus; i++) {
+        seL4_TCB_Suspend(vm_get_tcb(vm, i));
+    }
+    return 0;
+}
+
+
+static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge);
+
+static void vmm_handler_thread(vm_t *vm, seL4_Word vcpu_index)
+{
+    seL4_CPtr ep = vm->vcpus[vcpu_index].fault_ep;
+    vcpu_info_t *vcpu_info = &vm->vcpus[vcpu_index];
+    int err = 0;
+    while (1) {
+        seL4_MessageInfo_t tag;
+        seL4_Word sender_badge;
+        tag= seL4_Recv(ep, &sender_badge);
+        //printf("label %lx badge %lx\n", seL4_MessageInfo_get_label(tag), sender_badge);
+        seL4_CPtr vcpu = vm_get_vcpu(vm,  vcpu_index);
+        if (sender_badge == 0) {
+            seL4_Word label;
+            label = seL4_MessageInfo_get_label(tag);
+            switch (label) {
+                case IPI_MESSAGE_LABEL: {
+                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                    assert(!res.error);
+                    res.value |= BIT(1);
+                    seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+                    if (vcpu_info->suspended) {
+                        restart_fault(vcpu_info->fault);
+                        vcpu_info->suspended = 0;
+                    }
+                    break;
+                }
+#ifndef CONFIG_DIRECT_VCPU_IRQ
+                case IRQINJ_MESSAGE_LABLE: {
+                    int irq = seL4_GetMR(0);
+                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                    assert(!res.error);
+                    seL4_Word sip = res.value;
+                    switch (irq) {
+#if CONFIG_MAX_NUM_NODES > 1
+                        case IRQ_VCPU0_VTIMER:
+                        case IRQ_VCPU1_VTIMER:
+                        case IRQ_VCPU2_VTIMER:
+                        case IRQ_VCPU3_VTIMER:
+#else
+                        case IRQ_VTIMER:
+#endif
+                            sip |= BIT(5);
+                            break;
+                        default:
+                            printf("not timer ! %d\n", irq);
+                            assert(0);
+                            break;
+                    }
+                    int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
+                    if (vcpu_info->suspended) {
+                        // resume the VCPU if it is suspended (WFI)
+                        restart_fault(vcpu_info->fault);
+                        vcpu_info->suspended = 0;
+                    }
+                    assert(!err);
+                    break;
+                }
+#endif
+                case IRQ_MESSAGE_LABEL: {
+                    irq_server_handle_irq_ipc(vcpu_info->irq_server);
+                    break;
+                }
+                default:
+                    printf("vcpu %d for IPC badge %d\n", (int)vcpu_index, sender_badge);
+                    break;
+            }
+        } else {
+            int vm_badge = VM_VCPU_BADGE_GET_VM(sender_badge);
+            int vcpu = VM_VCPU_BADGE_GET_VCPU(sender_badge);
+            if (vcpu != vcpu_index) {
+                /* sanity check */
+                printf("VCPU %d expected %d\n", vcpu, vcpu_index);
+                assert(0);
+            }
+            if (vm_badge == VM_BADGE) {
+                err = vm_event(vm, tag, sender_badge | vcpu_index);
+                if (err) {
+                    /* Shutdown */
+                    vm_stop(vm);
+                    printf("vm 0 halts\n");
+                    seL4_DebugHalt();
+                }
+            }
+        }
+    }
+}
+
+static void irq_handler(struct irq_data *irq_data);
+
+static struct irq_data *linux_irq_data[256] = { 0 };
+
+struct virq_handle {
+    int virq;
+    void (*ack)(void *token);
+    void *token;
+    vm_t *vm;
+    struct virq_handle *next;
+};
+
+typedef struct virq_handle *virq_handle_t;
+
+static virq_handle_t vm_virq_new(vm_t* vm, int virq, void (*ack)(void*), void* token)
+{
+    struct virq_handle* virq_data;
+    int err;
+
+    virq_data = malloc(sizeof(*virq_data));
+    if (!virq_data) {
+        return NULL;
+    }
+    virq_data->virq = virq;
+    virq_data->token = token;
+    virq_data->ack = ack;
+    virq_data->vm = vm;
+    virq_data->next = NULL;
+    return virq_data;
+}
+
+void do_irq_server_ack(void *token);
+static int create_vmm_thread(vm_t *vm, vcpu_info_t *vcpu)
+{
+    int err = 0;
+
+    simple_t *simple = vm->simple;
+    seL4_CPtr cspace = simple_get_cnode(vm->simple);
+    vspace_t *vspace = vm->vmm_vspace;
+    sel4utils_thread_t *thread = &vcpu->vmm_thread;
+    sel4utils_thread_config_t config = thread_config_default(simple, cspace, seL4_NilData, 0, VMM_PRIO+ 10);
+    vka_object_t fault_ep;
+    err = sel4utils_configure_thread_config(vm->vka, vspace, vspace, config, thread);
+#if CONFIG_MAX_NUM_NODES > 1
+    printf("set VMM %lx to %d\n", thread->tcb.cptr, vm->nvcpus);
+    err = seL4_TCB_SetAffinity(thread->tcb.cptr, vm->nvcpus);
+    seL4_DebugNameThread(thread->tcb.cptr, "vmm_1");
+    assert(!err);
+#endif
+    err = vka_alloc_endpoint(vm->vka, &fault_ep);
+    assert(!err);
+    vcpu->fault_ep = fault_ep.cptr;
+    err = sel4utils_start_thread(thread, (void *)vmm_handler_thread, vm, (void *)(seL4_Word)vm->nvcpus, 1);
+    assert(!err);
+    printf("Create VMM thread for VCPU %d\n", (int)vm->nvcpus);
+
+    err = irq_server_new(vspace, vm->vka, cspace, IRQSERVER_PRIO,
+            simple, fault_ep.cptr, IRQ_MESSAGE_LABEL, 1, vm->nvcpus,
+            &vcpu->irq_server);
+    assert(!err);
+    printf("Create IRQ server for for VCPU %d\n", vm->nvcpus);
+    void (* handler)(struct irq_data *);
+    handler = &irq_handler;
+    struct irq_data *irq_data;
+    virq_handle_t virq;
+    switch (vm->nvcpus) {
+        case 1:
+            irq_data = irq_server_register_irq(vcpu->irq_server, 133, handler, NULL);
+            assert(irq_data);
+            linux_irq_data[133] = irq_data;
+
+            virq = vm_virq_new(vm, 133, &do_irq_server_ack, irq_data);
+            virq->next = irq_data->token;
+            irq_data->token = (void *)virq;
+            break;
+        case 2:
+            irq_data = irq_server_register_irq(vcpu->irq_server, 134, handler, NULL);
+            assert(irq_data);
+            linux_irq_data[134] = irq_data;
+
+            virq = vm_virq_new(vm, 134, &do_irq_server_ack, irq_data);
+            virq->next = irq_data->token;
+            irq_data->token = (void *)virq;
+            break;
+        case 3:
+            irq_data = irq_server_register_irq(vcpu->irq_server, 135, handler, NULL);
+            assert(irq_data);
+            linux_irq_data[135] = irq_data;
+            virq = vm_virq_new(vm, 135, &do_irq_server_ack, irq_data);
+            virq->next = irq_data->token;
+            irq_data->token = (void *)virq;
+            break;
+        default:
+            printf("unsupported %d\n", vm->nvcpus);
+            assert(0);
+    }
+
+    return 0;
+}
+
+static int vm_add_vcpu(vm_t *vm, uint64_t entry_point, uint64_t hart_id, seL4_Word dtb)
+{
+    if (vm->nvcpus == MAX_NUM_VCPUS) {
+        printf("Exceed max supported VCPUs %d\n", MAX_NUM_VCPUS);
+        return -1;
+    }
+    seL4_Word null_cap_data = seL4_NilData;
+    seL4_Word vm_vcpu_badge = VM_VCPU_BADGE(vm->vm_badge, (vm->nvcpus));
+
+
+    seL4_Word cspace_root_data = api_make_guard_skip_word(seL4_WordBits - VM_CSPACE_SIZE_BITS);
+    cspacepath_t src, dst;
+    int err;
+
+#ifdef CONFIG_PER_VCPU_VMM
+    create_vmm_thread(vm, &vm->vcpus[vm->nvcpus]);
+    /* per thread VMM */
+    seL4_CPtr fault_ep = vm->vcpus[vm->nvcpus].fault_ep;
+#else
+    /* one VMM */
+    seL4_CPtr fault_ep = vm->vmm_endpoint;
+#endif
+
+    /* Badge the endpoint */
+    vka_cspace_make_path(vm->vka, fault_ep, &src);
+    err = vka_cspace_alloc_path(vm->vka, &dst);
+    assert(!err);
+    err = vka_cnode_mint(&dst, &src, seL4_AllRights, vm_vcpu_badge);
+    assert(!err);
+
+    /* Copy it to the cspace of the VM for fault IPC */
+    src = dst;
+    dst.root = vm->cspace.cptr;
+    dst.capPtr = VM_FAULT_EP_SLOT + (vm->nvcpus);
+    dst.capDepth = VM_CSPACE_SIZE_BITS;
+    err = vka_cnode_copy(&dst, &src, seL4_AllRights);
+    assert(!err);
+
+    err = vka_alloc_tcb(vm->vka, &vm->vcpus[vm->nvcpus].tcb);
+    assert(!err);
+    err = seL4_TCB_Configure(vm->vcpus[vm->nvcpus].tcb.cptr, (VM_FAULT_EP_SLOT + vm->nvcpus),
+                             vm->cspace.cptr, cspace_root_data,
+                             vm->pd.cptr, null_cap_data, 0, seL4_CapNull);
+    assert(!err);
+    err = seL4_TCB_SetSchedParams(vm->vcpus[vm->nvcpus].tcb.cptr, simple_get_tcb(vm->simple), VM_PRIO, VM_PRIO);
+    assert(!err);
+
+    /* Create VCPU */
+    err = vka_alloc_vcpu(vm->vka, &vm->vcpus[vm->nvcpus].vcpu);
+    assert(!err);
+    err = seL4_RISCV_VCPU_SetTCB(vm->vcpus[vm->nvcpus].vcpu.cptr, vm->vcpus[vm->nvcpus].tcb.cptr);
+    assert(!err);
+    vm->vcpus[vm->nvcpus].hart_id = hart_id;
+    vm->vcpus[vm->nvcpus].entry_point = entry_point;
+    vm->vcpus[vm->nvcpus].fault = fault_init(vm, &vm->vcpus[vm->nvcpus]);
+    vm->vcpus[vm->nvcpus].suspended = 0;
+    assert(vm->vcpus[vm->nvcpus].fault);
+
+    seL4_UserContext regs;
+    bzero(&regs, sizeof(regs));
+    regs.a0 = hart_id;
+    regs.a1 = dtb;
+    regs.pc = entry_point;
+    err = seL4_TCB_WriteRegisters(vm->vcpus[vm->nvcpus].tcb.cptr, false, 0, sizeof(regs) / sizeof(regs.pc), &regs);
+    assert(!err);
+
+#if CONFIG_MAX_NUM_NODES > 1
+    err = seL4_TCB_SetAffinity(vm->vcpus[vm->nvcpus].tcb.cptr, vm->nvcpus);
+    vm->vcpus[vm->nvcpus].affinity = vm->nvcpus;
+    assert(!err);
+#endif
+    {
+        char buf[64];
+        snprintf(buf, 64, "vcpu %d", (int)hart_id);
+        seL4_DebugNameThread(vm->vcpus[vm->nvcpus].tcb.cptr, buf);
+    }
+    printf("Resume VCPU %lx %d\n", hart_id, vm->nvcpus);
+    err = seL4_TCB_Resume(vm->vcpus[vm->nvcpus].tcb.cptr);
+    assert(!err);
+
+    vm->nvcpus++;
+    return 0;
+}
 
 static int vm_create(const char* name, int priority,
           seL4_CPtr vmm_endpoint, seL4_Word vm_badge,
@@ -918,12 +1364,18 @@ static int vm_create(const char* name, int priority,
     vm->simple = simple;
     vm->vmm_vspace = vmm_vspace;
     vm->ndevices = 0;
+    vm->vmm_endpoint = vmm_endpoint;
+    vm->nvcpus = 1;
+    vm->vm_badge = VM_BADGE;
+    int vcpu_id = 0;
 
     /* Create a cspace */
     err = vka_alloc_cnode_object(vka, VM_CSPACE_SIZE_BITS, &vm->cspace);
     assert(!err);
     vka_cspace_make_path(vka, vm->cspace.cptr, &src);
+
     cspace_root_data = api_make_guard_skip_word(seL4_WordBits - VM_CSPACE_SIZE_BITS);
+
     dst.root = vm->cspace.cptr;
     dst.capPtr = VM_CSPACE_SLOT;
     dst.capDepth = VM_CSPACE_SIZE_BITS;
@@ -953,28 +1405,29 @@ static int vm_create(const char* name, int priority,
     assert(!err);
 
     /* Create TCB */
-    err = vka_alloc_tcb(vka, &vm->tcb);
+    err = vka_alloc_tcb(vka, &vm->vcpus[vcpu_id].tcb);
     assert(!err);
-    err = seL4_TCB_Configure(vm_get_tcb(vm), VM_FAULT_EP_SLOT,
+    err = seL4_TCB_Configure(vm_get_tcb(vm, vcpu_id), VM_FAULT_EP_SLOT,
                              vm->cspace.cptr, cspace_root_data,
                              vm->pd.cptr, null_cap_data, 0, seL4_CapNull);
     assert(!err);
 
-    err = seL4_TCB_SetSchedParams(vm_get_tcb(vm), simple_get_tcb(simple), priority - 1, priority - 1);
+    err = seL4_TCB_SetSchedParams(vm_get_tcb(vm, vcpu_id), simple_get_tcb(simple), priority, priority);
     assert(!err);
 
-    seL4_DebugNameThread(vm_get_tcb(vm), "vmlinux");
+    seL4_DebugNameThread(vm_get_tcb(vm, vcpu_id), "vmlinux");
 
     /* Create VCPU */
-    err = vka_alloc_vcpu(vka, &vm->vcpu);
+    err = vka_alloc_vcpu(vka, &vm->vcpus[vcpu_id].vcpu);
     assert(!err);
-    err = seL4_RISCV_VCPU_SetTCB(vm->vcpu.cptr, vm_get_tcb(vm));
+    err = seL4_RISCV_VCPU_SetTCB(vm->vcpus[vcpu_id].vcpu.cptr, vm_get_tcb(vm, vcpu_id));
     assert(!err);
 
     /* Initialise fault system */
-    vm->fault = fault_init(vm);
-    assert(vm->fault);
-
+    vm->vcpus[vcpu_id].fault = fault_init(vm, &vm->vcpus[vcpu_id]);
+    vm->vcpus[vcpu_id].affinity = 0;
+    vm->vcpus[vcpu_id].fault_ep = vmm_endpoint;
+    vm->vcpus[vcpu_id].suspended = 0;
     return err;
 }
 
@@ -986,7 +1439,7 @@ static int vm_set_bootargs(vm_t *vm, seL4_Word pc, seL4_Word hartid , seL4_Word 
     int err;
     assert(vm);
     /* Write CPU registers */
-    tcb = vm_get_tcb(vm);
+    tcb = vm_get_tcb(vm, 0);
     err = seL4_TCB_ReadRegisters(tcb, false, 0, sizeof(regs) / sizeof(regs.pc), &regs);
     assert(!err);
     regs.pc = pc;
@@ -996,17 +1449,6 @@ static int vm_set_bootargs(vm_t *vm, seL4_Word pc, seL4_Word hartid , seL4_Word 
     assert(!err);
     return err;
 }
-
-static int vm_start(vm_t *vm)
-{
-    return seL4_TCB_Resume(vm_get_tcb(vm));
-}
-
-static int vm_stop(vm_t *vm)
-{
-    return seL4_TCB_Suspend(vm_get_tcb(vm));
-}
-
 
 /* dummy global for libsel4muslcsys */
 char _cpio_archive[1];
@@ -1185,7 +1627,10 @@ static void *map_device(vspace_t *vspace, vka_t *vka, simple_t *simple, uintptr_
 
 void *map_vm_device(vm_t *vm, uintptr_t pa, uintptr_t va, seL4_CapRights_t rights)
 {
-    return map_device(vm_get_vspace(vm), vm->vka, vm->simple, pa, va, rights);
+    lock(&vm_map_device_lock);
+    void *ret = map_device(vm_get_vspace(vm), vm->vka, vm->simple, pa, va, rights);
+    unlock(&vm_map_device_lock);
+    return ret;
 }
 
 static void *map_emulated_device_pages(vm_t *vm, struct device *d)
@@ -1337,6 +1782,7 @@ static inline seL4_Word get_reg(seL4_UserContext *regs, int index)
 {
 
     switch (index) {
+        // X0 is always ZERO
         case 0:
             return 0;
         case 1:
@@ -1402,16 +1848,16 @@ static inline seL4_Word get_reg(seL4_UserContext *regs, int index)
         case 31:
             return regs->t6;
         default:
-            printf("Inalid index %d\n", index);
+            printf("Invalid index %d\n", index);
             assert(0);
     }
-
 }
 
 
 static inline void set_reg(seL4_UserContext *regs, int index, seL4_Word v)
 {
     switch (index) {
+        // X0 is always ZERO
         case 0:
             return;
         case 1:
@@ -1508,7 +1954,7 @@ static inline void set_reg(seL4_UserContext *regs, int index, seL4_Word v)
             regs->t6 = v;
             return;
         default:
-            printf("Inalid index %d\n", index);
+            printf("Invalid index %d\n", index);
             assert(0);
     }
 }
@@ -1523,6 +1969,8 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
     uintptr_t addr = fault->addr;
     uintptr_t offset = addr - PLIC_BASE;
     int write = fault_is_write(fault);
+    vcpu_info_t *vcpu_info = fault->vcpu;
+    assert(vcpu_info);
     void *vmm_va = (void *)d->priv;
     decode_inst(fault);
     seL4_UserContext *regs = fault_get_ctx(fault); 
@@ -1534,7 +1982,11 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
             uint32_t data = (uint32_t)get_reg(regs, ri->rs2);
             uint32_t *addr = (uint32_t *)(vmm_va + offset);
             *addr = data;
-            if (offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) {
+           // printf("pc %lx store data %x to %p %lx\n", regs->pc, data, addr, offset);
+            if ((offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) ||
+                (offset >= PLIC_H1_CC_START && offset < PLIC_H1_CC_END) ||
+                (offset >= PLIC_H2_CC_START && offset < PLIC_H2_CC_END)) {
+                //printf("cc %d\n", vcpu_info->hart_id);
                 plic_pending_irq = 0;
                 do_irq_server_ack(plic_pending_irq_token);
             }
@@ -1544,8 +1996,11 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
         case LD_OP: {
             assert(fault->width == WIDTH_WORD);
             uint32_t data = 0;
-            if (offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) {
+            if ((offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) ||
+                (offset >= PLIC_H1_CC_START && offset < PLIC_H1_CC_END) ||
+                (offset >= PLIC_H2_CC_START && offset < PLIC_H2_CC_END)) {
                 data = plic_pending_irq;
+                //printf("c %d %d\n", data, vcpu_info->hart_id);
                 plic_pending_irq = 0;
             } else {
                 data = *(uint32_t *)(vmm_va + offset);
@@ -1564,7 +2019,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
     }
     return 0;
 }
-
 
 struct device plic_dev = {
     .devid              = DEV_PLIC,
@@ -1600,56 +2054,40 @@ static int vm_install_plic(vm_t *vm)
     return vm_add_device(vm, &plic_dev); 
 }
 
-#define IRQ_UART    10
-#define IRQ_VTIMER  130
-
-#define SIP_TIMER       BIT(5)
-#define SIP_EXTERNAL    BIT(9)
-
 static int linux_irq[] = {
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    10,
+    IRQ_UART,       // 8250
 #if CONFIG_MAX_NUM_NODES > 1
-    132,
+    IRQ_VCPU0_VTIMER,
+#if CONFIG_MAX_NUM_NODES >= 2
+    IRQ_VCPU1_VTIMER,
+#endif
+#if CONFIG_MAX_NUM_NODES >= 3
+    IRQ_VCPU2_VTIMER,
+#endif
+#if CONFIG_MAX_NUM_NODES >= 4
+    IRQ_VCPU3_VTIMER,
+#endif
 #else
-    130
+    IRQ_VTIMER      // vtimer
 #endif
 };
 
-static struct irq_data *linux_irq_data[128] = { 0 };
-
-struct virq_handle {
-    int virq;
-    void (*ack)(void *token);
-    void *token;
-    vm_t *vm;
-    struct virq_handle *next;
-};
-
-typedef struct virq_handle *virq_handle_t;
-
-static virq_handle_t vm_virq_new(vm_t *vm, int virq, void (*ack)(void *), void *token)
+static inline vcpu_info_t *get_vcpu_by_irq(vm_t *vm, int irq)
 {
-    struct virq_handle *virq_data;
-    int err;
-
-    virq_data = malloc(sizeof(*virq_data));
-    if (!virq_data) {
-        return NULL;
+    switch (irq) {
+#if CONFIG_MAX_NUM_NODES > 1
+        case IRQ_VCPU0_VTIMER:
+            return &vm->vcpus[0];
+        case IRQ_VCPU1_VTIMER:
+            return &vm->vcpus[1];
+        case IRQ_VCPU2_VTIMER:
+            return &vm->vcpus[2];
+        case IRQ_VCPU3_VTIMER:
+            return &vm->vcpus[3];
+#endif
+        default:
+            return &vm->vcpus[0];
     }
-    virq_data->virq = virq;
-    virq_data->token = token;
-    virq_data->ack = ack;
-    virq_data->vm = vm;
-    virq_data->next = NULL;
-    return virq_data;
 }
 
 void do_irq_server_ack(void *token)
@@ -1658,15 +2096,31 @@ void do_irq_server_ack(void *token)
     vm_t *vm = (vm_t *)_irq_server->vm;
     struct irq_data* irq_data = (struct irq_data*)token;
 
-    seL4_CPtr vcpu = vm_get_vcpu(vm);
+    vcpu_info_t *vcpu_info = get_vcpu_by_irq(vm, irq_data->irq);
+    seL4_CPtr vcpu = vcpu_info->vcpu.cptr;
+
+#if CONFIG_MAX_NUM_NODES > 1
+#ifdef CONFIG_PER_VCPU_VMM
+    assert(vcpu_info->affinity == 0);
+#else
+    seL4_TCB_SetAffinity(seL4_CapInitThreadTCB, vcpu_info->affinity);
+#endif
+#endif
+
     seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
     assert(!res.error);
 
-    /* set the externall pending */
+    /* clear the externall pending */
     seL4_Word sip = res.value;
     switch (irq_data->irq) {
-        case 100:
-            sip &= ~SIP_TIMER;
+        case 130:
+        case 132:
+        case 133:
+        case 134:
+        case 135:
+            assert(0);
+            sip &= ~BIT(5);
+            break;
         default:
             sip &= ~SIP_EXTERNAL;
             break;
@@ -1676,9 +2130,10 @@ void do_irq_server_ack(void *token)
     irq_data_ack_irq(irq_data);
 }
 
-static int vm_inject_timer_interrupt(vm_t *vm)
+static int vm_inject_timer_interrupt(vm_t *vm, fault_t *fault)
 {
-    seL4_CPtr vcpu = vm_get_vcpu(vm);
+    assert(fault);
+    seL4_CPtr vcpu = fault->vcpu->vcpu.cptr;
     seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
     assert(!res.error);
     seL4_Word sip = res.value;
@@ -1695,23 +2150,32 @@ static int vm_inject_IRQ(virq_handle_t virq)
 {
     vm_t *vm = virq->vm;
 
-    seL4_CPtr vcpu = vm_get_vcpu(vm);
+    vcpu_info_t *vcpu_info = get_vcpu_by_irq(vm, virq->virq);
+    seL4_CPtr vcpu = vcpu_info->vcpu.cptr;
+
+#if CONFIG_MAX_NUM_NODES > 1
+#ifndef CONFIG_PER_VCPU_VMM
+    seL4_TCB_SetAffinity(seL4_CapInitThreadTCB, vcpu_info->affinity);
+#endif
+#endif
+
     seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
     assert(!res.error);
     seL4_Word sip = res.value;
-    res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIE);
-    assert(!res.error);
-    seL4_Word sie = res.value;
-    /* set the externall pending */
+
     switch (virq->virq) {
 #if CONFIG_MAX_NUM_NODES > 1
-        case 132:
+        case IRQ_VCPU0_VTIMER:
+        case IRQ_VCPU1_VTIMER:
+        case IRQ_VCPU2_VTIMER:
+        case IRQ_VCPU3_VTIMER:
 #else
-        case 130:
+        case IRQ_VTIMER:
 #endif
-            sip |= BIT(5);
+            sip |= SIP_TIMER;
             break;
         default:
+            /* set the external pending */
             plic_set_pending(virq->virq, virq->token);
             sip |= SIP_EXTERNAL;
             break;
@@ -1719,6 +2183,10 @@ static int vm_inject_IRQ(virq_handle_t virq)
     int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
     assert(!err);
 
+    if (vcpu_info->suspended) {
+        restart_fault(vcpu_info->fault);
+        vcpu_info->suspended = 0;
+    }
     return 0;
 }
 
@@ -1745,6 +2213,9 @@ static int install_linux_devices(vm_t *vm)
 
     for (int i = 0; i < ARRAY_SIZE(linux_irq); i++) {
         irq_t irq = linux_irq[i];
+#ifdef CONFIG_PER_VCPU_VMM
+        if (irq == 133 || irq == 134 || irq == 135) continue;
+#endif
         struct irq_data *irq_data = linux_irq_data[irq];
         virq_handle_t virq;
         void (*handler)(struct irq_data *);
@@ -1907,6 +2378,7 @@ static int copy_in_page(vspace_t *vmm_vspace, vspace_t *vm_vspace, vka_t *vka, v
     /* Find the VM frame */
     cap = vspace_get_cap(vm_vspace, src);
     if (cap == seL4_CapNull) {
+        printf("null cap %p\n", src);
         return -1;
     }
     bits = vspace_get_cookie(vm_vspace, src);
@@ -1931,8 +2403,8 @@ static int copy_in_page(vspace_t *vmm_vspace, vspace_t *vm_vspace, vka_t *vka, v
     }
     /* Map it into the VMM vspace */
     tmp_src = vspace_map_pages(vmm_vspace, &vmm_cap, NULL, seL4_AllRights, 1, bits, 1);
-    assert(tmp_src);
     if (tmp_src == NULL) {
+        printf("src %p dest %p\n", src, dest);
         assert(!"Failed to map frame for copyin\n");
         vka_cnode_delete(&vmm_cap_path);
         vka_cspace_free(vka, vmm_cap);
@@ -1977,7 +2449,10 @@ static int copy_in(vspace_t *dst_vspace, vspace_t *src_vspace, vka_t *vka, void 
 
 static int vm_copyin(vm_t *vm, void *data, uintptr_t address, size_t size)
 {
-    return copy_in(vm->vmm_vspace, vm_get_vspace(vm), vm->vka, data, address, size);
+    lock(&vm_copyin_lock);
+    int ret = copy_in(vm->vmm_vspace, vm_get_vspace(vm), vm->vka, data, address, size);
+    unlock(&vm_copyin_lock);
+    return ret;
 }
 
 #define DTB_ADDR    0x84000000
@@ -2046,14 +2521,17 @@ static void dump_guest(vm_t *vm, seL4_Word addr)
 #define DPW(...) do {} while (0)
 #endif
 
-static uint64_t pt[512];
+static uint64_t pt[CONFIG_MAX_NUM_NODES][512];
+
 /* translate guest va to guest pa Sv39 */
-static seL4_Word gva_to_gpa(vm_t *vm, seL4_Word va)
+static seL4_Word gva_to_gpa(vm_t *vm, seL4_Word va, int vcpu_id)
 {
     int level = 2;
-    bzero(pt, 4096);
+    assert(vcpu_id >=0 && vcpu_id < CONFIG_MAX_NUM_NODES);
+    uint64_t *ppt = &pt[vcpu_id][0];
+    bzero(ppt, 4096);
     seL4_Word satp = 0;
-    seL4_CPtr vcpu = vm_get_vcpu(vm);
+    seL4_CPtr vcpu = vm_get_vcpu(vm, vcpu_id);
     seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SATP);
     assert(!res.error);
     satp = res.value;
@@ -2066,21 +2544,24 @@ static seL4_Word gva_to_gpa(vm_t *vm, seL4_Word va)
     // read in the page table 
     while (level > 0) {
         DPW("copy in %lx level %d\n", gpa, level);
-        vm_copyin(vm, &pt, gpa, sizeof(uint64_t) * 512);
+        if (gpa == 0) {
+            while (1);
+        }
+        vm_copyin(vm, ppt, gpa, sizeof(uint64_t) * 512);
         for (int i = 0; i < 512; i++) {
-            if (pt[i] != 0) {
-                DPW("pte %d %lx\n", i, pt[i]);
+            if (ppt[i] != 0) {
+                DPW("pte %d %lx\n", i, ppt[i]);
             }
         }
         int vpn = GET_VPN(va, level);
-        pte = pt[vpn];
+        pte = ppt[vpn];
         DPW("index %d pte %lx gpa %lx level %d\n", vpn, pte, gpa, level);
         if (pte & PTE_V && (pte & PTE_R || pte & PTE_X)) {
             /* we reach a leaf page */
             if (level == 2) { 
                 /* 1 GiB page */
                 DPW("pa  %lx %lx level %d\n", PTE_GET_1G(pte), PTE_GET_1G(pte) << 30, level);
-                return (PTE_GET_1G(pte) << 30)  | (va & 0x3fffffff); 
+                return (PTE_GET_1G(pte) << 30)  | (va & 0x3fffffff);
             }
             if (level == 1) {
                 /* 2 MiB page */
@@ -2101,6 +2582,7 @@ static seL4_Word gva_to_gpa(vm_t *vm, seL4_Word va)
         level--;
     }
     DPW("invalid GVA TO GPA translation \n");
+    assert(!"invalid");
     return 0;
 }
 
@@ -2109,8 +2591,10 @@ void decode_inst(fault_t *f)
     uint32_t *i = &(f->decoded_inst.inst);
     riscv_inst_t *ri = &(f->decoded_inst);
     *i = 0;
+
     //seL4_Word ip_gpa = gva_to_gpa(f->vm, f->ip);
     //vm_copyin(f->vm, i, ip_gpa, 4);
+
     /* with a bit improvement from the kernel, now we do
      * not need to do the nested page table walking to
      * get the faulting instruction for decoding
@@ -2184,18 +2668,59 @@ static int handle_page_fault(vm_t *vm, fault_t *fault)
     return err;
 }
 
-static int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
+#define WFI_INST    0x10500073
+
+static int handle_invalid_inst(vm_t *vm, fault_t *fault)
+{
+    seL4_UserContext *regs = fault_get_ctx(fault);
+    seL4_CPtr tcb = fault->vcpu->tcb.cptr;
+    if (fault->riscv_inst == WFI_INST) {
+        // block the thread by not replying to it, but advance the PC by 4 first
+        fault->vcpu->suspended = 1;
+        regs->pc += 4;
+        seL4_TCB_WriteRegisters(tcb, false, 0,
+                sizeof(*regs) / sizeof(regs->pc), regs);
+        return 0;
+    }
+
+    // ignore other invalid instructions at the moment
+    printf("Unhanlded instruction %x pc %lx\n", fault->riscv_inst, regs->pc);
+
+    regs->pc += 4;
+    seL4_TCB_WriteRegisters(tcb, false, 0,
+            sizeof(*regs) / sizeof(regs->pc), regs);
+    restart_fault(fault);
+
+    return 0;
+
+}
+
+#define CAUSE_INVALID_INST  0x2
+#define CAUSE_HYPCALL       0xa
+
+static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
 {
     seL4_Word label;
     seL4_Word length;
-
+    int vcpu_id = VM_VCPU_BADGE_GET_VCPU(badge);
     label = seL4_MessageInfo_get_label(tag);
     length = seL4_MessageInfo_get_length(tag);
+    fault_t *fault = vm_get_fault(vm, vcpu_id);
+    fault->vcpu_id = vcpu_id;
+    assert(fault);
+    assert(fault->vcpu);
+    seL4_CPtr tcb = fault->vcpu->tcb.cptr;
+    seL4_CPtr vcpu = fault->vcpu->vcpu.cptr;
 
+#if CONFIG_MAX_NUM_NODES > 1
+#ifndef CONFIG_PER_VCPU_VMM
+    seL4_TCB_SetAffinity(seL4_CapInitThreadTCB, fault->vcpu->affinity);
+#endif
+#endif
     switch (label) {
+
     case seL4_Fault_VMFault: {
         int err;
-        fault_t *fault = vm->fault;
         err = new_fault(fault);
         assert(!err);
         seL4_UserContext *regs = fault_get_ctx(fault);
@@ -2207,38 +2732,39 @@ static int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
         seL4_Word pc;
         int err;
         assert(length == seL4_UserException_Length);
-        pc = seL4_GetMR(0);
+
         seL4_UserContext *regs;
-        fault_t *fault = vm->fault;
-        new_fault(fault);
+        new_user_fault(fault);
+        seL4_Word cause = seL4_GetMR(seL4_UserException_Number);
         regs = fault_get_ctx(fault);
+
+        switch (cause) {
+            /* invalid instruction */
+            case CAUSE_INVALID_INST:
+                return handle_invalid_inst(vm, fault);
+                break;
+            default:
+                printf("Unhandled user exception cause %d at pc %lx VCPU ID %d\n",
+                        cause, regs->pc, (int)vcpu_id);
+                break;
+        }
+
         regs->pc += 4;
-        seL4_TCB_WriteRegisters(vm_get_tcb(vm), false, 0,
+        seL4_TCB_WriteRegisters(tcb, false, 0,
                     sizeof(*regs) / sizeof(regs->pc), regs);
         restart_fault(fault);
         return 0;
-       
-        if (!err) {
-            seL4_MessageInfo_t reply;
-
-            reply = seL4_MessageInfo_new(0, 0, 0, 0);
-            seL4_Reply(reply);
-        }
     }
-    break;
 
-#define CAUSE_HYPCALL 0xa
+    break;
 
     case seL4_Fault_VCPUFault: {
         seL4_MessageInfo_t reply;
         seL4_Word cause;
         int err;
-        fault_t* fault;
-        fault = vm->fault;
         assert(length == seL4_VCPUFault_Length);
         cause = seL4_GetMR(seL4_VCPUFault_Cause);
         /* check if the exception class (bits 26-31) of the HSR indicate WFI/WFE */
-        
         if (cause == CAUSE_HYPCALL) {
             seL4_UserContext *regs;
             new_fault(fault);
@@ -2248,38 +2774,93 @@ static int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
                     putchar(regs->a0);
                     regs->a0 = 0;
                     break;
+
                 case SBI_SET_TIMER: {
                     uint64_t cur = 0;
+                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                    assert(!res.error);
+                    res.value &= ~SIP_TIMER;
+                    seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+
                     asm volatile("rdtime %0" : "=r"(cur));
                     if (cur >= regs->a0) {
                         /* Already passed the target time, inject directly */
-                        vm_inject_timer_interrupt(vm);
+                        vm_inject_timer_interrupt(vm, fault);
                         break;
                     } 
-                    err = seL4_RISCV_VCPU_WriteRegs(vm_get_vcpu(vm), seL4_VCPUReg_TIMER, regs->a0);
+
+                    err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_TIMER, regs->a0);
                     assert(!err);
 
-                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vm_get_vcpu(vm), seL4_VCPUReg_SIP);
-                    assert(!res.error);
-                    res.value &= ~SIP_TIMER;
-                    seL4_RISCV_VCPU_WriteRegs(vm_get_vcpu(vm), seL4_VCPUReg_SIP, res.value);
                     regs->a0 = 0;
                     break;
                 }
+
                 case SBI_SHUTDOWN: {
                     /* Just suspend the VM */
-
-                    seL4_CPtr tcb = vm_get_tcb(vm);
                     int err = seL4_TCB_Suspend(tcb);
                     assert(!err);
                     break;
                 }
 
+                case SBI_SEND_IPI: {
+                    seL4_Word hartid_mask = regs->a0;
+                    seL4_Word ip_gpa = gva_to_gpa(fault->vm, regs->a0, vcpu_id);
+                    if (ip_gpa == 0) {
+                        printf("regs->a0 is %lx on vcpu %d\n", regs->a0, (int)vcpu_id);
+                    }
+                    assert(ip_gpa != 0);
+                    vm_copyin(fault->vm, &hartid_mask, ip_gpa, sizeof(hartid_mask));
+                    //printf("hartmask %llx %d\n", hartid_mask, (int)vcpu_id);
+                    for (int i = 0; i < MAX_NUM_VCPUS; i++) {
+                        if (hartid_mask & BIT(i)) {
+#ifdef CONFIG_PER_VCPU_VMM
+                            if (i == vcpu_id) {
+                                seL4_CPtr vcpu = vm_get_vcpu(vm, i);
+                                seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                                assert(!res.error);
+                                res.value |= BIT(1);
+                                seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+                            } else {
+                                seL4_MessageInfo_t info = seL4_MessageInfo_new(IPI_MESSAGE_LABEL, 0, 0, 1);
+                                seL4_SetMR(0, i);
+                                seL4_NBSend(vm->vcpus[i].fault_ep, info);
+                            }
+#else
+#if CONFIG_MAX_NUM_NODES > 1
+                            seL4_TCB_SetAffinity(seL4_CapInitThreadTCB, i);
+#endif
+
+                            seL4_CPtr vcpu = vm_get_vcpu(vm, i);
+
+                            seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                            assert(!res.error);
+                            res.value |= BIT(1);
+                            seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+#endif
+
+                        }
+                    }
+                    regs->a0 = 0;
+                    break;
+                }
+
+                case SBI_CLEAR_IPI: {
+                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                    assert(!res.error);
+                    res.value &= ~BIT(1);
+                    seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+                    regs->a0 = 0;
+                    break;
+                }
+
                 default:
+                    break;
                     printf("unhandled hypcall %d\n", regs->a7);
             }
+
             regs->pc += 4;
-            seL4_TCB_WriteRegisters(vm_get_tcb(vm), false, 0,
+            seL4_TCB_WriteRegisters(tcb, false, 0,
                         sizeof(*regs) / sizeof(regs->pc), regs);
             restart_fault(fault);
             return 0;
@@ -2297,7 +2878,6 @@ static int vm_event(vm_t *vm, seL4_MessageInfo_t tag)
     return 0;
 }
 
-
 int main(void)
 {
     vm_t vm;
@@ -2309,6 +2889,7 @@ int main(void)
     err = vm_create(VM_NAME, VM_PRIO, _fault_endpoint, VM_BADGE,
                     &_vka, &_simple, &_vspace, &_io_ops, &vm);
     _irq_server->vm = &vm;
+
     if (err) {
         printf("Failed to create VM\n");
         seL4_DebugHalt();
@@ -2328,7 +2909,21 @@ int main(void)
     vm_set_bootargs(&vm, (seL4_Word)entry, 0, DTB_ADDR); 
     /* Power on */
     printf("Starting VM\n\n");
+
     err = vm_start(&vm);
+
+#if CONFIG_MAX_NUM_NODES > 1
+#if CONFIG_MAX_NUM_NODES >= 2
+    vm_add_vcpu(&vm, (seL4_Word)entry, 1, DTB_ADDR);
+#endif
+#if CONFIG_MAX_NUM_NODES >= 3
+    vm_add_vcpu(&vm, (seL4_Word)entry, 2, DTB_ADDR);
+#endif
+#if CONFIG_MAX_NUM_NODES >= 4
+    vm_add_vcpu(&vm, (seL4_Word)entry, 3, DTB_ADDR);
+#endif
+#endif
+
     if (err) {
         printf("Failed to start VM\n");
         seL4_DebugHalt();
@@ -2344,14 +2939,33 @@ int main(void)
         if (sender_badge == 0) {
             seL4_Word label;
             label = seL4_MessageInfo_get_label(tag);
-            if (label == IRQ_MESSAGE_LABEL) {
+            switch (label) {
+                case IRQ_MESSAGE_LABEL:
                 irq_server_handle_irq_ipc(_irq_server);
-            } else {
-                printf("Unknown label (%d) for IPC badge %d\n", label, sender_badge);
+                break;
+
+                case IPI_MESSAGE_LABEL: {
+                    seL4_Word mr = seL4_GetMR(0);
+                    assert(mr == 0);
+                    seL4_CPtr vcpu = vm_get_vcpu(&vm, 0);
+                    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
+                    assert(!res.error);
+                    res.value |= BIT(1);
+                    seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+                    vcpu_info_t *vi = &vm.vcpus[0];
+                    if (vi->suspended) {
+                        restart_fault(vi->fault);
+                        vi->suspended = 0;
+                    }
+                    break;
+                }
+                default:
+                    printf("Unknown label (%d) for IPC badge %d\n", label, sender_badge);
+                    break;
             }
+
         } else {
-            assert(sender_badge == VM_BADGE);
-            err = vm_event(&vm, tag);
+            err = vm_event(&vm, tag, sender_badge);
             if (err) {
                 /* Shutdown */
                 vm_stop(&vm);
