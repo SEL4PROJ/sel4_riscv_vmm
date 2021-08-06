@@ -2592,14 +2592,14 @@ void decode_inst(fault_t *f)
     riscv_inst_t *ri = &(f->decoded_inst);
     *i = 0;
 
-    //seL4_Word ip_gpa = gva_to_gpa(f->vm, f->ip);
-    //vm_copyin(f->vm, i, ip_gpa, 4);
+    seL4_Word ip_gpa = gva_to_gpa(f->vm, f->ip, f->vcpu_id);
+    vm_copyin(f->vm, i, ip_gpa, 4);
 
     /* with a bit improvement from the kernel, now we do
      * not need to do the nested page table walking to
      * get the faulting instruction for decoding
      */
-    *i = f->riscv_inst;
+    f->riscv_inst = *i;
     ri->opcode = OPCODE(*i);
     switch (ri->opcode) {
         case ST_OP:
