@@ -1007,7 +1007,7 @@ static int vmm_get_guest_vspace(vspace_t *loader, vspace_t *new_vspace, vka_t *v
 
 #else
 
-#define IRQ_VTIMER  130
+#define IRQ_VTIMER          130
 #endif
 
 #define SIP_TIMER       BIT(5)
@@ -1451,8 +1451,8 @@ static int vm_set_bootargs(vm_t *vm, seL4_Word pc, seL4_Word hartid , seL4_Word 
 }
 
 /* dummy global for libsel4muslcsys */
-char _cpio_archive[1];
-char _cpio_archive_end[1];
+extern char _cpio_archive[1];
+extern char _cpio_archive_end[1];
 
 #define MAP_PAGE_BITS   21
 #define MAP_PAGE_SIZE   (1 << MAP_PAGE_BITS)
