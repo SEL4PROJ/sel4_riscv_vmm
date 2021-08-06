@@ -2697,6 +2697,11 @@ static int handle_invalid_inst(vm_t *vm, fault_t *fault)
 
 #define CAUSE_INVALID_INST  0x2
 #define CAUSE_HYPCALL       0xa
+#define CAUSE_INSTRUCTION_GUEST_PAGE_FAULT  0x14
+#define CAUSE_LOAD_GUEST_PAGE_FAULT         0x15
+#define CAUSE_VIRTUAL_INSTRUCTION           0x16
+#define CAUSE_STORE_GUEST_PAGE_FAULT        0x17
+
 
 static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
 {
