@@ -2461,14 +2461,14 @@ static void *load_linux(vm_t *vm, const char *kernel_name, const char *dtb_name)
 {
     unsigned long size;
     unsigned long cpio_len = _cpio_archive_end - _cpio_archive;
-    void *file = cpio_get_file(_cpio_archive, cpio_len, (const char *)kernel_name, &size);
+    const void *file = cpio_get_file(_cpio_archive, cpio_len, (const char *)kernel_name, &size);
     if (file == NULL) {
         printf("Failed to get %s from CPIO\n", kernel_name);
         return NULL;
     }
     printf("Found %s at %p len %ld %x\n", kernel_name, file, size, *(int *)file);
     seL4_Word entry = RAM_BASE + 0x2000000;
-    if (vm_copyout(vm, file, entry, size)) {
+    if (vm_copyout(vm, (void *)file, entry, size)) {
         printf("Failed to load %s\n", kernel_name);
         return NULL;
     }
@@ -2478,7 +2478,7 @@ static void *load_linux(vm_t *vm, const char *kernel_name, const char *dtb_name)
         printf("Failed to get %s from CPIO\n", dtb_name);
         return NULL;
     }
-    if (vm_copyout(vm, file, DTB_ADDR, size)) {
+    if (vm_copyout(vm, (void *)file, DTB_ADDR, size)) {
         printf("Failed to load %s\n", dtb_name);
         return NULL;
     }
