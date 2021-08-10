@@ -2766,12 +2766,28 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
     case seL4_Fault_VCPUFault: {
         seL4_MessageInfo_t reply;
         seL4_Word cause;
+        seL4_UserContext *regs;
         int err;
+        if (length != seL4_VCPUFault_Length) {
+            printf("kaka %lx %lx\n", length, seL4_VCPUFault_Length);
+        }
         assert(length == seL4_VCPUFault_Length);
         cause = seL4_GetMR(seL4_VCPUFault_Cause);
         /* check if the exception class (bits 26-31) of the HSR indicate WFI/WFE */
+        if (cause == CAUSE_VIRTUAL_INSTRUCTION) {
+            uint32_t data = seL4_GetMR(seL4_VCPUFault_Data);
+            if (data == WFI_INST) {
+                new_fault(fault);
+                regs = fault_get_ctx(fault);
+                regs->pc += 4;
+                seL4_TCB_WriteRegisters(tcb, false, 0, sizeof(*regs) / sizeof(regs->pc), regs);
+                restart_fault(fault);
+                return 0;
+            }
+            printf("Unhandled virtual instruction exception data %x\n", data);
+            return -1;
+        }
         if (cause == CAUSE_HYPCALL) {
-            seL4_UserContext *regs;
             new_fault(fault);
             regs = fault_get_ctx(fault);
             switch (regs->a7) {
