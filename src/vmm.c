@@ -2815,6 +2815,7 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
                     if (cur >= regs->a0) {
                         /* Already passed the target time, inject directly */
                         vm_inject_timer_interrupt(vm, fault);
+                        regs->a0 = 0;
                         break;
                     } 
 
