@@ -2002,6 +2002,12 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
                 data = plic_pending_irq;
                 //printf("c %d %d %d\n", data, vcpu_info->hart_id, vcpu_info->affinity);
                 plic_pending_irq = 0;
+                // clear the pending external interrupt bit when reading the claim
+                seL4_RISCV_VCPU_ReadRegs_t sip = seL4_RISCV_VCPU_ReadRegs(vcpu_info->vcpu.cptr, seL4_VCPUReg_SIP);
+                assert(!sip.error);
+                sip.value &= ~SIP_EXTERNAL;
+                int err = seL4_RISCV_VCPU_WriteRegs(vcpu_info->vcpu.cptr, seL4_VCPUReg_SIP, sip.value);
+                assert(!err);
             } else {
                 data = *(uint32_t *)(vmm_va + offset);
             }
@@ -2107,6 +2113,7 @@ void do_irq_server_ack(void *token)
 #endif
 #endif
 
+#if 0
     seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
     assert(!res.error);
 
@@ -2127,6 +2134,7 @@ void do_irq_server_ack(void *token)
     }
     int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
     assert(!err);
+#endif
     irq_data_ack_irq(irq_data);
 }
 
