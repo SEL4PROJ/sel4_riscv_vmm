@@ -1986,7 +1986,7 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
             if ((offset >= PLIC_H0_CC_START && offset < PLIC_H0_CC_END) ||
                 (offset >= PLIC_H1_CC_START && offset < PLIC_H1_CC_END) ||
                 (offset >= PLIC_H2_CC_START && offset < PLIC_H2_CC_END)) {
-                //printf("cc %d\n", vcpu_info->hart_id);
+                //printf("cc %d %d\n", vcpu_info->hart_id, vcpu_info->affinity);
                 plic_pending_irq = 0;
                 do_irq_server_ack(plic_pending_irq_token);
             }
@@ -2000,7 +2000,7 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
                 (offset >= PLIC_H1_CC_START && offset < PLIC_H1_CC_END) ||
                 (offset >= PLIC_H2_CC_START && offset < PLIC_H2_CC_END)) {
                 data = plic_pending_irq;
-                //printf("c %d %d\n", data, vcpu_info->hart_id);
+                //printf("c %d %d %d\n", data, vcpu_info->hart_id, vcpu_info->affinity);
                 plic_pending_irq = 0;
             } else {
                 data = *(uint32_t *)(vmm_va + offset);
