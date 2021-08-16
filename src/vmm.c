@@ -58,7 +58,7 @@ static inline void unlock(int *lock)
 #endif
 
 #if CONFIG_MAX_NUM_NODES > 1
-#define CONFIG_PER_VCPU_VMM
+//#define CONFIG_PER_VCPU_VMM
 #endif
 /* IRQs are directly injected from the irq handler thread */
 #define CONFIG_DIRECT_VCPU_IRQ
