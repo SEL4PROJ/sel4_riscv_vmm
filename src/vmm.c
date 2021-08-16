@@ -2867,6 +2867,9 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
                             assert(!res.error);
                             res.value |= BIT(1);
                             seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, res.value);
+#if CONFIG_MAX_NUM_NODES > 1
+                            seL4_TCB_SetAffinity(seL4_CapInitThreadTCB, fault->vcpu->affinity);
+#endif
 #endif
 
                         }
