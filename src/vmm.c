@@ -2000,7 +2000,6 @@ static int handle_plic_fault(struct device *d, vm_t *vm, fault_t *fault)
                 (offset >= PLIC_H1_CC_START && offset < PLIC_H1_CC_END) ||
                 (offset >= PLIC_H2_CC_START && offset < PLIC_H2_CC_END)) {
                 data = plic_pending_irq;
-                //printf("c %d %d %d\n", data, vcpu_info->hart_id, vcpu_info->affinity);
                 plic_pending_irq = 0;
                 // clear the pending external interrupt bit when reading the claim
                 seL4_RISCV_VCPU_ReadRegs_t sip = seL4_RISCV_VCPU_ReadRegs(vcpu_info->vcpu.cptr, seL4_VCPUReg_SIP);
@@ -2113,28 +2112,6 @@ void do_irq_server_ack(void *token)
 #endif
 #endif
 
-#if 0
-    seL4_RISCV_VCPU_ReadRegs_t res = seL4_RISCV_VCPU_ReadRegs(vcpu, seL4_VCPUReg_SIP);
-    assert(!res.error);
-
-    /* clear the externall pending */
-    seL4_Word sip = res.value;
-    switch (irq_data->irq) {
-        case 130:
-        case 132:
-        case 133:
-        case 134:
-        case 135:
-            assert(0);
-            sip &= ~BIT(5);
-            break;
-        default:
-            sip &= ~SIP_EXTERNAL;
-            break;
-    }
-    int err = seL4_RISCV_VCPU_WriteRegs(vcpu, seL4_VCPUReg_SIP, sip);
-    assert(!err);
-#endif
     irq_data_ack_irq(irq_data);
 }
 
@@ -2777,7 +2754,7 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
         seL4_UserContext *regs;
         int err;
         if (length != seL4_VCPUFault_Length) {
-            printf("kaka %lx %lx\n", length, seL4_VCPUFault_Length);
+            printf("Invalid VCPU fault length %lx expected %lx\n", length, seL4_VCPUFault_Length);
         }
         assert(length == seL4_VCPUFault_Length);
         cause = seL4_GetMR(seL4_VCPUFault_Cause);
@@ -2841,7 +2818,6 @@ static int vm_event(vm_t* vm, seL4_MessageInfo_t tag, seL4_Word badge)
                     }
                     assert(ip_gpa != 0);
                     vm_copyin(fault->vm, &hartid_mask, ip_gpa, sizeof(hartid_mask));
-                    //printf("hartmask %llx %d\n", hartid_mask, (int)vcpu_id);
                     for (int i = 0; i < MAX_NUM_VCPUS; i++) {
                         if (hartid_mask & BIT(i)) {
 #ifdef CONFIG_PER_VCPU_VMM
